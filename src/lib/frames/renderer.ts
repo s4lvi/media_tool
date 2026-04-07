@@ -30,7 +30,16 @@ export async function renderFrameTemplate(
     backgroundColor: "#ffffff",
     selection: false,
     interactive: false,
+    enableRetinaScaling: false, // 1:1 pixel mapping to avoid resampling washout
+    imageSmoothingEnabled: true,
   });
+
+  // Force high-quality image resampling on the canvas context
+  const ctx = canvas.getContext();
+  if (ctx) {
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+  }
 
   // Sort by zIndex (default 0)
   const sorted = [...template.objects].sort(
