@@ -123,17 +123,26 @@ async function renderPhotoZone(
   let img = await loadImage(photoUrl);
 
   // Pre-scale large images before filtering to avoid browser canvas size limits
-  // (filters on huge images can produce a clamped canvas leaving black space)
+  // (filters on huge images can produce a clamped canvas leaving black space).
+  // Use PNG (lossless) so colors aren't washed out by JPEG re-encoding.
   const rawW = img.naturalWidth;
   const rawH = img.naturalHeight;
   const maxDim = 4096;
-  if (obj.filters && (rawW > maxDim || rawH > maxDim)) {
+  const hasFilters = obj.filters && (
+    obj.filters.grayscale ||
+    obj.filters.brightness !== undefined ||
+    obj.filters.contrast !== undefined
+  );
+  if (hasFilters && (rawW > maxDim || rawH > maxDim)) {
     const downscale = maxDim / Math.max(rawW, rawH);
     const tmpCanvas = document.createElement("canvas");
     tmpCanvas.width = Math.round(rawW * downscale);
     tmpCanvas.height = Math.round(rawH * downscale);
-    tmpCanvas.getContext("2d")!.drawImage(img, 0, 0, tmpCanvas.width, tmpCanvas.height);
-    img = await loadImage(tmpCanvas.toDataURL("image/jpeg", 0.92));
+    const tmpCtx = tmpCanvas.getContext("2d")!;
+    tmpCtx.imageSmoothingEnabled = true;
+    tmpCtx.imageSmoothingQuality = "high";
+    tmpCtx.drawImage(img, 0, 0, tmpCanvas.width, tmpCanvas.height);
+    img = await loadImage(tmpCanvas.toDataURL("image/png"));
   }
 
   const fabricImg = new fabric.FabricImage(img, {
