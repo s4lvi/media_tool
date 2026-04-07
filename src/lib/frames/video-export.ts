@@ -140,6 +140,21 @@ async function renderOverlayBlob(
       editorMode: false,
       backgroundColor: "transparent",
     });
+    // Punch a transparent hole at every photo-zone location so the video
+    // can show through, even if other objects (gradients, shapes) painted
+    // over it.
+    const ctx = offscreen.getContext("2d");
+    if (ctx) {
+      ctx.save();
+      ctx.globalCompositeOperation = "destination-out";
+      for (const obj of template.objects) {
+        if (obj.type === "photo-zone") {
+          ctx.fillStyle = "rgba(0,0,0,1)";
+          ctx.fillRect(obj.x, obj.y, obj.width, obj.height);
+        }
+      }
+      ctx.restore();
+    }
     return await new Promise<Blob>((resolve, reject) => {
       offscreen.toBlob((b) => {
         if (b) resolve(b);
