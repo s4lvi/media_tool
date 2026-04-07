@@ -125,6 +125,58 @@ async function renderOverlayBlob(
   width: number,
   height: number
 ): Promise<Blob> {
+  const photoZones = template.objects.filter((o) => o.type === "photo-zone");
+  if (photoZones.length === 0) {
+    return renderOverlayPass(template, texts, width, height, () => true);
+  }
+  // Use the lowest photo zone zIndex as the split point
+  const splitZ = Math.min(...photoZones.map((o) => o.zIndex ?? 0));
+  const holes = photoZones.map((o) => ({
+    x: o.x, y: o.y, width: o.width, height: o.height,
+  }));
+
+  // Background: objects below the split point, with holes punched at photo zones
+  const bgBlob = await renderOverlayPass(
+    template,
+    texts,
+    width,
+    height,
+    (obj) => obj.type !== "photo-zone" && (obj.zIndex ?? 0) < splitZ,
+    holes
+  );
+  // Foreground: objects at or above the split point (but not the photo zones)
+  const fgBlob = await renderOverlayPass(
+    template,
+    texts,
+    width,
+    height,
+    (obj) => obj.type !== "photo-zone" && (obj.zIndex ?? 0) >= splitZ
+  );
+  // Composite fg over bg
+  return composeBlobs(bgBlob, fgBlob, width, height);
+}
+
+async function composeBlobs(bg: Blob, fg: Blob, w: number, h: number): Promise<Blob> {
+  const [bgBmp, fgBmp] = await Promise.all([createImageBitmap(bg), createImageBitmap(fg)]);
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d")!;
+  ctx.drawImage(bgBmp, 0, 0, w, h);
+  ctx.drawImage(fgBmp, 0, 0, w, h);
+  return await new Promise<Blob>((resolve, reject) => {
+    c.toBlob((b) => (b ? resolve(b) : reject(new Error("compose failed"))), "image/png");
+  });
+}
+
+async function renderOverlayPass(
+  template: FrameTemplate,
+  texts: { heading?: string; subheading?: string },
+  width: number,
+  height: number,
+  filter: (obj: import("@/types/frame-template").FrameObject) => boolean,
+  punchHoles: Array<{ x: number; y: number; width: number; height: number }> = []
+): Promise<Blob> {
   const offscreen = document.createElement("canvas");
   offscreen.width = width;
   offscreen.height = height;
@@ -139,21 +191,19 @@ async function renderOverlayBlob(
       texts,
       editorMode: false,
       backgroundColor: "transparent",
+      objectFilter: filter,
     });
-    // Punch a transparent hole at every photo-zone location so the video
-    // can show through, even if other objects (gradients, shapes) painted
-    // over it.
-    const ctx = offscreen.getContext("2d");
-    if (ctx) {
-      ctx.save();
-      ctx.globalCompositeOperation = "destination-out";
-      for (const obj of template.objects) {
-        if (obj.type === "photo-zone") {
+    if (punchHoles.length > 0) {
+      const ctx = offscreen.getContext("2d");
+      if (ctx) {
+        ctx.save();
+        ctx.globalCompositeOperation = "destination-out";
+        for (const h of punchHoles) {
           ctx.fillStyle = "rgba(0,0,0,1)";
-          ctx.fillRect(obj.x, obj.y, obj.width, obj.height);
+          ctx.fillRect(h.x, h.y, h.width, h.height);
         }
+        ctx.restore();
       }
-      ctx.restore();
     }
     return await new Promise<Blob>((resolve, reject) => {
       offscreen.toBlob((b) => {

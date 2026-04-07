@@ -18,6 +18,7 @@ export interface RenderOptions {
   texts?: { heading?: string; subheading?: string };
   editorMode?: boolean; // editor: show placeholders even without photos
   backgroundColor?: string; // override canvas background ("transparent" for none)
+  objectFilter?: (obj: FrameObject) => boolean; // skip objects that don't match
 }
 
 export async function renderFrameTemplate(
@@ -70,6 +71,7 @@ export async function renderFrameTemplate(
   );
 
   for (const obj of sorted) {
+    if (opts.objectFilter && !opts.objectFilter(obj)) continue;
     try {
       await renderObject(canvas, obj, opts, scale);
     } catch (e) {
