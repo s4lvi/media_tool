@@ -30,15 +30,16 @@ export interface Frame {
   created_at: string;
 }
 
-export interface Project {
+export interface Post {
   id: string;
   organization_id: string;
   created_by: string;
-  template_id: string | null;
+  frame_template_id: string | null;
   name: string;
-  canvas_json: Record<string, unknown>;
   width: number;
   height: number;
+  photo_refs: string[];
+  text_content: { heading?: string; subheading?: string; [key: string]: string | undefined };
   thumbnail_url: string | null;
   created_at: string;
   updated_at: string;

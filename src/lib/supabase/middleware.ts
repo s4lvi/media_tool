@@ -48,7 +48,24 @@ export async function updateSession(request: NextRequest) {
   // Redirect authenticated users away from auth pages and root
   if (user && (request.nextUrl.pathname === "/login" || request.nextUrl.pathname === "/signup" || request.nextUrl.pathname === "/")) {
     const url = request.nextUrl.clone();
-    url.pathname = "/projects";
+    url.pathname = "/posts";
+    return NextResponse.redirect(url);
+  }
+
+  // Redirect legacy routes to new ones
+  const legacyRedirects: Record<string, string> = {
+    "/projects": "/posts",
+    "/quick-create": "/posts/new",
+  };
+  if (legacyRedirects[request.nextUrl.pathname]) {
+    const url = request.nextUrl.clone();
+    url.pathname = legacyRedirects[request.nextUrl.pathname];
+    return NextResponse.redirect(url);
+  }
+  // /projects/abc → /posts/abc
+  if (request.nextUrl.pathname.startsWith("/projects/")) {
+    const url = request.nextUrl.clone();
+    url.pathname = request.nextUrl.pathname.replace("/projects/", "/posts/");
     return NextResponse.redirect(url);
   }
 

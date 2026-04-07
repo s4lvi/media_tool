@@ -10,35 +10,32 @@ import {
   Trash2,
   ImagePlus,
   Frame,
-  Type,
+  Wand2,
   Download,
-  ArrowRight,
 } from "lucide-react";
-import type { Project } from "@/types/database";
+import type { Post } from "@/types/database";
 
-export default function ProjectsPage() {
-  const [projects, setProjects] = useState<Project[]>([]);
+export default function PostsPage() {
+  const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    async function loadProjects() {
+    async function load() {
       const supabase = createClient();
       const { data } = await supabase
         .from("projects")
         .select("*")
         .order("updated_at", { ascending: false });
-
-      if (data) setProjects(data);
+      if (data) setPosts(data as Post[]);
       setLoading(false);
     }
-
-    loadProjects();
+    load();
   }, []);
 
-  async function deleteProject(id: string) {
+  async function deletePost(id: string) {
     const supabase = createClient();
     await supabase.from("projects").delete().eq("id", id);
-    setProjects((prev) => prev.filter((p) => p.id !== id));
+    setPosts((prev) => prev.filter((p) => p.id !== id));
   }
 
   if (loading) {
@@ -49,18 +46,17 @@ export default function ProjectsPage() {
     );
   }
 
-  // Empty state with guided onboarding
-  if (projects.length === 0) {
+  // Empty state with onboarding
+  if (posts.length === 0) {
     return (
       <div className="p-8 max-w-3xl mx-auto">
         <div className="text-center py-12">
           <h1 className="text-3xl font-bold mb-3">Welcome to Media Tool</h1>
           <p className="text-muted-foreground text-lg mb-8">
-            Create branded social media posts for your organization in minutes.
+            Create branded social media posts in three steps.
           </p>
-
           <Link
-            href="/editor/new"
+            href="/posts/new"
             className={buttonVariants({ size: "lg" }) + " text-base px-8 py-6 mb-12"}
           >
             <Plus className="h-5 w-5 mr-2" />
@@ -68,71 +64,47 @@ export default function ProjectsPage() {
           </Link>
         </div>
 
-        {/* How it works */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mt-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-4">
           <div className="text-center space-y-3 p-4">
             <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mx-auto">
               <ImagePlus className="h-6 w-6 text-primary" />
             </div>
             <h3 className="font-medium text-sm">1. Upload Photos</h3>
             <p className="text-xs text-muted-foreground">
-              Drag and drop your photos onto the canvas or use the upload button.
+              Pick one or more photos you want to feature.
             </p>
           </div>
-
           <div className="text-center space-y-3 p-4">
             <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mx-auto">
               <Frame className="h-6 w-6 text-primary" />
             </div>
-            <h3 className="font-medium text-sm">2. Add a Frame</h3>
+            <h3 className="font-medium text-sm">2. Pick a Frame</h3>
             <p className="text-xs text-muted-foreground">
-              Apply your branded frame overlay with configurable blend modes.
+              Choose from your reusable frame templates.
             </p>
           </div>
-
-          <div className="text-center space-y-3 p-4">
-            <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mx-auto">
-              <Type className="h-6 w-6 text-primary" />
-            </div>
-            <h3 className="font-medium text-sm">3. Add Text & Logos</h3>
-            <p className="text-xs text-muted-foreground">
-              Add headings, body text, and organization logos to your design.
-            </p>
-          </div>
-
           <div className="text-center space-y-3 p-4">
             <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mx-auto">
               <Download className="h-6 w-6 text-primary" />
             </div>
-            <h3 className="font-medium text-sm">4. Export</h3>
+            <h3 className="font-medium text-sm">3. Customize & Save</h3>
             <p className="text-xs text-muted-foreground">
-              Download your finished post as a high-resolution PNG or JPEG.
+              Add a heading, save the post, download as PNG.
             </p>
           </div>
         </div>
 
         <div className="mt-12 rounded-xl border border-border bg-card p-6">
           <h3 className="font-medium mb-2 flex items-center gap-2">
-            Quick Start Tips
+            <Wand2 className="h-4 w-4 text-primary" />
+            Need a frame template?
           </h3>
-          <ul className="text-sm text-muted-foreground space-y-2">
-            <li className="flex items-start gap-2">
-              <ArrowRight className="h-4 w-4 mt-0.5 text-primary shrink-0" />
-              <span>Go to <strong>Frames</strong> to upload your branded frame overlays (PNG with transparency)</span>
-            </li>
-            <li className="flex items-start gap-2">
-              <ArrowRight className="h-4 w-4 mt-0.5 text-primary shrink-0" />
-              <span>Use the <strong>Logos</strong> tab in the editor to quickly add your organization logos</span>
-            </li>
-            <li className="flex items-start gap-2">
-              <ArrowRight className="h-4 w-4 mt-0.5 text-primary shrink-0" />
-              <span>Choose from preset canvas sizes like <strong>Square (1:1)</strong>, <strong>Story (9:16)</strong>, or <strong>Landscape (16:9)</strong></span>
-            </li>
-            <li className="flex items-start gap-2">
-              <ArrowRight className="h-4 w-4 mt-0.5 text-primary shrink-0" />
-              <span>Use <strong>blend modes</strong> (multiply, screen, overlay) to control how frames mix with your photos</span>
-            </li>
-          </ul>
+          <p className="text-sm text-muted-foreground mb-3">
+            Frames are reusable layouts you build once and apply to many posts.
+          </p>
+          <Link href="/frames" className={buttonVariants({ variant: "outline", size: "sm" })}>
+            Manage Frames
+          </Link>
         </div>
       </div>
     );
@@ -141,39 +113,33 @@ export default function ProjectsPage() {
   return (
     <div className="p-8">
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-semibold">Projects</h1>
-        <Link href="/editor/new" className={buttonVariants()}>
-          <Plus className="h-4 w-4 mr-1" />
-          New Project
-        </Link>
+        <h1 className="text-2xl font-semibold">Posts</h1>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-        {projects.map((project) => (
-          <Card key={project.id} className="group overflow-hidden">
-            <Link href={`/editor/${project.id}`}>
+        {posts.map((post) => (
+          <Card key={post.id} className="group overflow-hidden">
+            <Link href={`/posts/${post.id}`}>
               <div className="aspect-square bg-muted flex items-center justify-center">
-                {project.thumbnail_url ? (
+                {post.thumbnail_url ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
-                    src={project.thumbnail_url}
-                    alt={project.name}
+                    src={post.thumbnail_url}
+                    alt={post.name}
                     className="w-full h-full object-cover"
                   />
                 ) : (
                   <span className="text-muted-foreground text-sm">
-                    {project.width}x{project.height}
+                    {post.width}x{post.height}
                   </span>
                 )}
               </div>
             </Link>
             <CardContent className="p-3 flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium truncate">
-                  {project.name}
-                </p>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium truncate">{post.name}</p>
                 <p className="text-xs text-muted-foreground">
-                  {new Date(project.updated_at).toLocaleDateString()}
+                  {new Date(post.updated_at).toLocaleDateString()}
                 </p>
               </div>
               <Button
@@ -182,7 +148,7 @@ export default function ProjectsPage() {
                 className="h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity"
                 onClick={(e) => {
                   e.preventDefault();
-                  deleteProject(project.id);
+                  deletePost(post.id);
                 }}
               >
                 <Trash2 className="h-3 w-3" />
