@@ -168,7 +168,10 @@ async function renderPhotoZone(
 
   const sx = w / origW;
   const sy = h / origH;
-  const s = obj.scaleMode === "contain" ? Math.min(sx, sy) : Math.max(sx, sy);
+  // Cover mode: small overscale (1.005x) to guarantee full coverage and avoid
+  // 1px white edges from rounding. Contain stays exact.
+  const baseScale = obj.scaleMode === "contain" ? Math.min(sx, sy) : Math.max(sx, sy);
+  const s = obj.scaleMode === "cover" ? baseScale * 1.005 : baseScale;
   fabricImg.scale(s);
 
   const sw = origW * s;
@@ -180,9 +183,11 @@ async function renderPhotoZone(
   });
 
   if (obj.scaleMode === "cover") {
+    // Inset clipPath by 0.5px to prevent edge bleed at the rect boundary
     fabricImg.set({
       clipPath: new fabric.Rect({
-        left: x, top: y, width: w, height: h,
+        left: x - 0.5, top: y - 0.5,
+        width: w + 1, height: h + 1,
         absolutePositioned: true,
       }),
     });
@@ -198,13 +203,21 @@ function renderTextZone(
   x: number, y: number, w: number, h: number,
   scale: number
 ) {
-  let text = obj.defaultText || "";
+  // Resolve text from user input first; fall back to default ONLY in editor mode
+  let text = "";
   if (opts.texts) {
-    if (obj.placeholder === "heading") text = opts.texts.heading || text;
-    if (obj.placeholder === "subheading") text = opts.texts.subheading || text;
+    if (obj.placeholder === "heading") text = opts.texts.heading || "";
+    if (obj.placeholder === "subheading") text = opts.texts.subheading || "";
   }
+
+  // In production render mode, skip empty text zones entirely
+  if (!text && !opts.editorMode) {
+    return;
+  }
+
+  // Editor mode: show placeholder so user can see/edit it
   if (!text && opts.editorMode) {
-    text = obj.placeholder === "heading" ? "[Heading]" : obj.placeholder === "subheading" ? "[Subheading]" : "[Text]";
+    text = obj.defaultText || (obj.placeholder === "heading" ? "[Heading]" : obj.placeholder === "subheading" ? "[Subheading]" : "[Text]");
   }
   if (obj.uppercase) text = text.toUpperCase();
 

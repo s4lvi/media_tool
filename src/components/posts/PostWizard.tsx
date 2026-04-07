@@ -153,11 +153,11 @@ export default function PostWizard({ initialPost }: PostWizardProps) {
       offscreen.style.left = "-99999px";
       document.body.appendChild(offscreen);
       fc = await renderFrameTemplate(offscreen, selectedTemplate, {
-        scale: 0.5,
+        scale: 0.7,
         photos: photoUrls,
         texts: { heading, subheading },
       });
-      const dataUrl = frameToDataUrl(fc, "jpeg", 0.88);
+      const dataUrl = frameToDataUrl(fc, "png", 1);
       setPreviewDataUrl(dataUrl);
     } catch (e) {
       console.error("Render failed:", e);
