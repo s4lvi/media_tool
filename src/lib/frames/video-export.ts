@@ -97,10 +97,12 @@ export async function exportVideoWithFrame(
     const pz = photoZone as { x: number; y: number; width: number; height: number };
 
     // 4. Create the export canvas at template dimensions
+    // Use willReadFrequently: false (default) since we're only writing.
+    // alpha: true is required for VideoFrame construction in some browsers.
     const exportCanvas = document.createElement("canvas");
     exportCanvas.width = template.width;
     exportCanvas.height = template.height;
-    const ctx = exportCanvas.getContext("2d", { alpha: false })!;
+    const ctx = exportCanvas.getContext("2d")!;
 
     function drawFrame() {
       ctx.fillStyle = "#000";
@@ -342,9 +344,9 @@ async function encodeMp4(
   return new Promise<Blob>((resolve, reject) => {
     let stopped = false;
     let frameIndex = 0;
-    const frameDurationUs = Math.round(1_000_000 / fps);
+    let lastTimestampUs = -1;
 
-    function tick(): boolean {
+    function encodeOneFrame(timestampSec: number): boolean {
       if (stopped) return false;
       if (encoderError) {
         stopped = true;
@@ -356,12 +358,23 @@ async function encodeMp4(
         reject(new Error(`VideoEncoder state is ${encoder.state}, not configured`));
         return false;
       }
+
+      // Back-pressure: skip this frame if encoder queue is too deep
+      if (encoder.encodeQueueSize > 5) {
+        return true;
+      }
+
       try {
         drawFrame();
-        const timestamp = frameIndex * frameDurationUs;
+        let timestampUs = Math.round(timestampSec * 1_000_000);
+        // Ensure strictly monotonic timestamps
+        if (timestampUs <= lastTimestampUs) {
+          timestampUs = lastTimestampUs + 1000;
+        }
+        lastTimestampUs = timestampUs;
+
         const vf = new VideoFrame(exportCanvas, {
-          timestamp,
-          duration: frameDurationUs,
+          timestamp: timestampUs,
         });
         const keyFrame = frameIndex % (fps * 2) === 0;
         encoder.encode(vf, { keyFrame });
@@ -380,18 +393,18 @@ async function encodeMp4(
 
     const hasRVFC =
       typeof (video as HTMLVideoElement & {
-        requestVideoFrameCallback?: (cb: () => void) => number;
+        requestVideoFrameCallback?: (cb: (now: number, metadata: { mediaTime: number }) => void) => number;
       }).requestVideoFrameCallback === "function";
 
-    function videoFrameLoop() {
-      if (!tick()) return;
+    function videoFrameLoop(_now: number, metadata: { mediaTime: number }) {
+      if (!encodeOneFrame(metadata.mediaTime)) return;
       (video as HTMLVideoElement & {
-        requestVideoFrameCallback: (cb: () => void) => number;
-      }).requestVideoFrameCallback(() => videoFrameLoop());
+        requestVideoFrameCallback: (cb: (now: number, metadata: { mediaTime: number }) => void) => number;
+      }).requestVideoFrameCallback(videoFrameLoop);
     }
 
     function rafLoop() {
-      if (!tick()) return;
+      if (!encodeOneFrame(video.currentTime)) return;
       requestAnimationFrame(rafLoop);
     }
 
@@ -413,8 +426,13 @@ async function encodeMp4(
     video
       .play()
       .then(() => {
-        if (hasRVFC) videoFrameLoop();
-        else rafLoop();
+        if (hasRVFC) {
+          (video as HTMLVideoElement & {
+            requestVideoFrameCallback: (cb: (now: number, metadata: { mediaTime: number }) => void) => number;
+          }).requestVideoFrameCallback(videoFrameLoop);
+        } else {
+          rafLoop();
+        }
       })
       .catch(reject);
   });
