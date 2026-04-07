@@ -10,6 +10,7 @@ import type {
 } from "@/types/frame-template";
 import { expandGradientStops } from "./gradient-curve";
 import { resolveAssetPath } from "./asset-resolver";
+import { detectColorSpaceFromUrl, type DetectedColorSpace } from "./colorspace";
 
 export interface RenderOptions {
   scale?: number;
@@ -24,17 +25,38 @@ export async function renderFrameTemplate(
   opts: RenderOptions = {}
 ): Promise<fabric.Canvas> {
   const scale = opts.scale ?? 1;
+
+  // Detect colorspace of the user-provided photos. If any are wide-gamut
+  // (Display P3), we need a P3 canvas or the colors get gamut-clipped to
+  // sRGB and look washed out.
+  let colorSpace: DetectedColorSpace = "srgb";
+  if (opts.photos && opts.photos.length > 0) {
+    const detected = await Promise.all(
+      opts.photos.map((url) => detectColorSpaceFromUrl(url))
+    );
+    if (detected.some((c) => c === "display-p3")) {
+      colorSpace = "display-p3";
+    }
+  }
+
+  if (colorSpace === "display-p3") {
+    try {
+      canvasEl.getContext("2d", { colorSpace: "display-p3" } as CanvasRenderingContext2DSettings);
+    } catch {
+      // Older browsers fall back to sRGB
+    }
+  }
+
   const canvas = new fabric.Canvas(canvasEl, {
     width: template.width * scale,
     height: template.height * scale,
     backgroundColor: "#ffffff",
     selection: false,
     interactive: false,
-    enableRetinaScaling: false, // 1:1 pixel mapping to avoid resampling washout
+    enableRetinaScaling: false,
     imageSmoothingEnabled: true,
   });
 
-  // Force high-quality image resampling on the canvas context
   const ctx = canvas.getContext();
   if (ctx) {
     ctx.imageSmoothingEnabled = true;
@@ -143,11 +165,17 @@ async function renderPhotoZone(
     obj.filters.contrast !== undefined
   );
   if (hasFilters && (rawW > maxDim || rawH > maxDim)) {
+    const photoColorSpace = await detectColorSpaceFromUrl(photoUrl);
     const downscale = maxDim / Math.max(rawW, rawH);
     const tmpCanvas = document.createElement("canvas");
     tmpCanvas.width = Math.round(rawW * downscale);
     tmpCanvas.height = Math.round(rawH * downscale);
-    const tmpCtx = tmpCanvas.getContext("2d")!;
+    let tmpCtx: CanvasRenderingContext2D;
+    try {
+      tmpCtx = tmpCanvas.getContext("2d", { colorSpace: photoColorSpace } as CanvasRenderingContext2DSettings) as CanvasRenderingContext2D;
+    } catch {
+      tmpCtx = tmpCanvas.getContext("2d")!;
+    }
     tmpCtx.imageSmoothingEnabled = true;
     tmpCtx.imageSmoothingQuality = "high";
     tmpCtx.drawImage(img, 0, 0, tmpCanvas.width, tmpCanvas.height);
