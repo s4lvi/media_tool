@@ -298,8 +298,6 @@ async function demuxVideo(blob: Blob): Promise<{
       file.onSamples = (id: number, _user: unknown, samples: any[]) => {
         if (track && id === track.id) {
           collected.push(...samples);
-          // Release the samples that mp4box is holding
-          file.releaseUsedSamples(id, collected.length);
           if (collected.length >= (track.nb_samples ?? 0) && !extracted) {
             extracted = true;
             file.flush();
