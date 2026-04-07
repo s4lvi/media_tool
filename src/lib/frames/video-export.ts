@@ -1,17 +1,39 @@
 import * as fabric from "fabric";
+import { FFmpeg } from "@ffmpeg/ffmpeg";
+import { fetchFile, toBlobURL } from "@ffmpeg/util";
 import type { FrameTemplate } from "@/types/frame-template";
 import { renderFrameTemplate } from "./renderer";
 
 /**
  * Export a video by:
- *   1. Pre-rendering the frame template overlay as a transparent PNG (main thread, needs fabric)
- *   2. Spawning a web worker that demuxes the source video, decodes frames,
- *      composites video + overlay on an OffscreenCanvas, re-encodes, and muxes
- *   3. Receiving the result blob from the worker
- *
- * Inputs accepted: MP4 / MOV (mp4box.js demuxer). WebM input not supported.
- * Outputs: MP4 (H.264) or WebM (VP9). Both via WebCodecs in the worker.
+ *  1. Pre-rendering the frame template overlay (no photos) as a transparent PNG via fabric
+ *  2. Loading ffmpeg.wasm
+ *  3. Running a single filter graph that scales+crops the source video to the photo
+ *     zone, places it on a black canvas of the template size, and overlays the PNG
+ *  4. Returning the resulting blob
  */
+
+let ffmpegInstance: FFmpeg | null = null;
+let ffmpegLoading: Promise<FFmpeg> | null = null;
+
+async function getFFmpeg(): Promise<FFmpeg> {
+  if (ffmpegInstance) return ffmpegInstance;
+  if (ffmpegLoading) return ffmpegLoading;
+
+  ffmpegLoading = (async () => {
+    const ffmpeg = new FFmpeg();
+    const baseURL = "https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd";
+    await ffmpeg.load({
+      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
+      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
+    });
+    ffmpegInstance = ffmpeg;
+    return ffmpeg;
+  })();
+
+  return ffmpegLoading;
+}
+
 export async function exportVideoWithFrame(
   template: FrameTemplate,
   videoUrl: string,
@@ -19,69 +41,90 @@ export async function exportVideoWithFrame(
   format: "webm" | "mp4" = "mp4",
   onProgress?: (pct: number) => void
 ): Promise<Blob> {
-  // 1. Pre-render the frame overlay (no photos) as a transparent PNG.
-  // We need fabric for this, which only works on the main thread.
-  const overlayBlob = await renderOverlayBlob(template, texts);
+  // Round to even — yuv420p requires it
+  const tw = Math.floor(template.width / 2) * 2;
+  const th = Math.floor(template.height / 2) * 2;
 
-  // 2. Find the photo zone for cover-fit positioning
   const photoZone = template.objects.find((o) => o.type === "photo-zone");
   if (!photoZone) throw new Error("Template has no photo zone for the video");
-  const pz = {
-    x: photoZone.x,
-    y: photoZone.y,
-    width: photoZone.width,
-    height: photoZone.height,
-  };
+  const pzw = Math.max(2, Math.floor(photoZone.width / 2) * 2);
+  const pzh = Math.max(2, Math.floor(photoZone.height / 2) * 2);
+  const pzx = Math.floor(photoZone.x);
+  const pzy = Math.floor(photoZone.y);
 
-  // 3. Fetch the source video as a Blob (handles both blob: URLs and signed URLs)
+  onProgress?.(0.05);
+
+  // 1. Pre-render the overlay
+  const overlayBlob = await renderOverlayBlob(template, texts, tw, th);
+  onProgress?.(0.15);
+
+  // 2. Fetch source video
   const videoRes = await fetch(videoUrl);
   if (!videoRes.ok) throw new Error("Failed to fetch source video");
   const videoBlob = await videoRes.blob();
+  onProgress?.(0.25);
 
-  // 4. Spawn the worker
-  const worker = new Worker(new URL("../../workers/video-export.worker.ts", import.meta.url), {
-    type: "module",
+  // 3. Load ffmpeg.wasm
+  const ffmpeg = await getFFmpeg();
+  onProgress?.(0.4);
+
+  ffmpeg.on("progress", ({ progress }) => {
+    if (progress > 0 && progress <= 1) {
+      onProgress?.(0.4 + progress * 0.55);
+    }
   });
 
-  return new Promise<Blob>((resolve, reject) => {
-    worker.onmessage = (e: MessageEvent) => {
-      const msg = e.data;
-      if (msg.type === "progress" && onProgress) onProgress(msg.pct);
-      if (msg.type === "done") {
-        worker.terminate();
-        resolve(msg.blob);
-      }
-      if (msg.type === "error") {
-        worker.terminate();
-        reject(new Error(msg.message));
-      }
-    };
-    worker.onerror = (e) => {
-      worker.terminate();
-      reject(new Error("Worker error: " + (e.message || "unknown")));
-    };
+  // 4. Write inputs
+  const inputName = "input." + (videoBlob.type.includes("quicktime") ? "mov" : "mp4");
+  await ffmpeg.writeFile(inputName, await fetchFile(videoBlob));
+  await ffmpeg.writeFile("overlay.png", await fetchFile(overlayBlob));
 
-    worker.postMessage({
-      type: "export",
-      videoBlob,
-      overlayBlob,
-      photoZone: pz,
-      templateWidth: template.width,
-      templateHeight: template.height,
-      outputFormat: format,
-      fps: 30,
-    });
+  // 5. Build filter graph: black canvas → scaled video at photo zone → PNG overlay on top
+  const filter =
+    `color=c=black:s=${tw}x${th}:r=30[bg];` +
+    `[0:v]scale=${pzw}:${pzh}:force_original_aspect_ratio=increase,crop=${pzw}:${pzh},setsar=1[vid];` +
+    `[bg][vid]overlay=${pzx}:${pzy}:shortest=1[withvid];` +
+    `[withvid][1:v]overlay=0:0:format=auto[out]`;
+
+  const outputName = format === "mp4" ? "output.mp4" : "output.webm";
+  const codecArgs = format === "mp4"
+    ? ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+    : ["-c:v", "libvpx", "-b:v", "2M", "-pix_fmt", "yuv420p"];
+
+  await ffmpeg.exec([
+    "-i", inputName,
+    "-i", "overlay.png",
+    "-filter_complex", filter,
+    "-map", "[out]",
+    "-map", "0:a?",
+    "-c:a", "aac",
+    "-shortest",
+    ...codecArgs,
+    outputName,
+  ]);
+
+  const data = (await ffmpeg.readFile(outputName)) as Uint8Array;
+
+  // Cleanup
+  try { await ffmpeg.deleteFile(inputName); } catch {}
+  try { await ffmpeg.deleteFile("overlay.png"); } catch {}
+  try { await ffmpeg.deleteFile(outputName); } catch {}
+
+  onProgress?.(1);
+  return new Blob([data.buffer as ArrayBuffer], {
+    type: format === "mp4" ? "video/mp4" : "video/webm",
   });
 }
 
-/**
- * Pre-render the frame template's static overlay (no photos) as a PNG Blob.
- */
 async function renderOverlayBlob(
   template: FrameTemplate,
-  texts: { heading?: string; subheading?: string }
+  texts: { heading?: string; subheading?: string },
+  width: number,
+  height: number
 ): Promise<Blob> {
   const offscreen = document.createElement("canvas");
+  offscreen.width = width;
+  offscreen.height = height;
   offscreen.style.position = "fixed";
   offscreen.style.left = "-99999px";
   document.body.appendChild(offscreen);
