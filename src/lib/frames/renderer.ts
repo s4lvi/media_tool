@@ -17,6 +17,7 @@ export interface RenderOptions {
   photos?: string[]; // user uploads (optional in editor mode)
   texts?: { heading?: string; subheading?: string };
   editorMode?: boolean; // editor: show placeholders even without photos
+  backgroundColor?: string; // override canvas background ("transparent" for none)
 }
 
 export async function renderFrameTemplate(
@@ -50,7 +51,7 @@ export async function renderFrameTemplate(
   const canvas = new fabric.Canvas(canvasEl, {
     width: template.width * scale,
     height: template.height * scale,
-    backgroundColor: "#ffffff",
+    backgroundColor: opts.backgroundColor ?? "#ffffff",
     selection: false,
     interactive: false,
     enableRetinaScaling: false,

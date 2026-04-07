@@ -135,6 +135,7 @@ async function renderOverlayBlob(
       photos: [],
       texts,
       editorMode: false,
+      backgroundColor: "transparent",
     });
     return await new Promise<Blob>((resolve, reject) => {
       offscreen.toBlob((b) => {
