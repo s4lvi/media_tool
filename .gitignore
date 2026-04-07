@@ -39,3 +39,16 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# AI agent tooling
+.agents/
+.claude/
+.trae/
+skills/
+skills-lock.json
+
+# Test photos (large user content not needed in repo)
+public/assets/img5300.jpeg
+public/assets/img5402.jpeg
+public/assets/greenhouse-group.jpeg
+public/assets/test-photo.jpeg
