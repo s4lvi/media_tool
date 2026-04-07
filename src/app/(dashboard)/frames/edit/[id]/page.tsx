@@ -15,11 +15,14 @@ import {
   newShape,
   newGradient,
 } from "@/lib/frames/editor-canvas";
+import { renderFrameTemplate, frameToDataUrl } from "@/lib/frames/renderer";
+import { useHistory } from "@/lib/frames/use-history";
+import PropertiesPanel from "@/components/frame-editor/PropertiesPanel";
+import LayersPanel from "@/components/frame-editor/LayersPanel";
 import { ASPECT_RATIO_PRESETS } from "@/types/editor";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Slider } from "@/components/ui/slider";
 import {
   Select,
   SelectContent,
@@ -32,23 +35,14 @@ import {
   ImagePlus,
   Type as TypeIcon,
   Square,
-  Stamp,
   Palette,
-  Trash2,
   Save,
-  Copy,
-  AlignLeft,
-  AlignCenter,
-  AlignRight,
-  AlignStartHorizontal,
-  AlignCenterHorizontal,
-  AlignEndHorizontal,
-  ChevronUp,
-  ChevronDown,
-  ChevronsUp,
-  ChevronsDown,
+  Undo2,
+  Redo2,
+  Download,
 } from "lucide-react";
 import type { FrameTemplate, FrameObject } from "@/types/frame-template";
+// re-export note: FrameObject is imported above and re-used in handlers below
 import type { Asset } from "@/types/database";
 import { uploadFile, getStoragePath } from "@/lib/supabase/storage";
 import { makeAssetRef } from "@/lib/frames/asset-resolver";
@@ -79,6 +73,10 @@ export default function FrameEditorPage() {
   const logoUploadRef = useRef<HTMLInputElement>(null);
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const [previewBg, setPreviewBg] = useState<"white" | "black" | "checker">("white");
+
+  // History stack and clipboard hoisted so the canvas useEffect can use them
+  const history = useHistory<{ objects: FrameObject[] }>();
+  const clipboardRef = useRef<FrameObject | null>(null);
 
   // Load or create frame template
   useEffect(() => {
@@ -208,20 +206,76 @@ export default function FrameEditorPage() {
     canvas.on("selection:cleared", () => {
       setSelectedObj(null);
     });
-    canvas.on("object:modified", () => forceUpdate({}));
+    canvas.on("object:modified", () => {
+      forceUpdate({});
+      // Snapshot AFTER modification commits
+      history.push({ objects: extractFrameObjects(canvas) });
+    });
 
-    // Keyboard delete
+    // Initial snapshot
+    history.push({ objects: extractFrameObjects(canvas) });
+
+    // Keyboard shortcuts
     const handleKey = (e: KeyboardEvent) => {
-      // Don't intercept when an input/textarea has focus
       const tag = (document.activeElement?.tagName || "").toUpperCase();
       if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+      const cmd = e.metaKey || e.ctrlKey;
+
       if ((e.key === "Delete" || e.key === "Backspace") && canvas.getActiveObject()) {
         const active = canvas.getActiveObject();
         if (active && !("isEditing" in active && (active as { isEditing: boolean }).isEditing)) {
           canvas.remove(active);
           canvas.discardActiveObject();
           canvas.renderAll();
+          history.push({ objects: extractFrameObjects(canvas) });
         }
+      }
+
+      if (cmd && e.key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        const snap = history.undo();
+        if (snap && template) {
+          canvas.discardActiveObject();
+          setSelectedObj(null);
+          loadFrameIntoEditor(canvas, { ...template, objects: snap.objects });
+        }
+      }
+      if (cmd && (e.key === "y" || (e.key === "z" && e.shiftKey))) {
+        e.preventDefault();
+        const snap = history.redo();
+        if (snap && template) {
+          canvas.discardActiveObject();
+          setSelectedObj(null);
+          loadFrameIntoEditor(canvas, { ...template, objects: snap.objects });
+        }
+      }
+      if (cmd && e.key === "c") {
+        const active = canvas.getActiveObject();
+        if (active) {
+          const data = (active as unknown as { data?: { frameObject: FrameObject } }).data;
+          if (data?.frameObject) {
+            clipboardRef.current = JSON.parse(JSON.stringify(data.frameObject));
+          }
+        }
+      }
+      if (cmd && e.key === "v" && clipboardRef.current) {
+        e.preventDefault();
+        const cloned: FrameObject = {
+          ...JSON.parse(JSON.stringify(clipboardRef.current)),
+          id: crypto.randomUUID(),
+          x: (clipboardRef.current.x ?? 0) + 20,
+          y: (clipboardRef.current.y ?? 0) + 20,
+        };
+        createEditorObject(cloned).then((fabricObj) => {
+          if (fabricObj && fabricCanvasRef.current) {
+            fabricCanvasRef.current.add(fabricObj);
+            fabricCanvasRef.current.setActiveObject(fabricObj);
+            fabricCanvasRef.current.renderAll();
+            setSelectedObj(fabricObj);
+            history.push({ objects: extractFrameObjects(fabricCanvasRef.current) });
+          }
+        });
       }
     };
     window.addEventListener("keydown", handleKey);
@@ -319,6 +373,88 @@ export default function FrameEditorPage() {
     canvas.renderAll();
     setSelectedObj(newFabricObj);
   }, [selectedObj]);
+
+  // History helpers (history is hoisted above)
+  const snapshotHistory = useCallback(() => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+    history.push({ objects: extractFrameObjects(canvas) });
+  }, [history]);
+
+  const restoreSnapshot = useCallback(async (snap: { objects: FrameObject[] } | null) => {
+    if (!snap || !template) return;
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+    canvas.discardActiveObject();
+    setSelectedObj(null);
+    await loadFrameIntoEditor(canvas, { ...template, objects: snap.objects });
+    canvas.renderAll();
+  }, [template]);
+
+  const handleUndo = useCallback(async () => {
+    const snap = history.undo();
+    await restoreSnapshot(snap);
+  }, [history, restoreSnapshot]);
+
+  const handleRedo = useCallback(async () => {
+    const snap = history.redo();
+    await restoreSnapshot(snap);
+  }, [history, restoreSnapshot]);
+
+  // Copy/paste handlers (clipboardRef is hoisted above)
+  const handleCopy = useCallback(() => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+    const active = canvas.getActiveObject();
+    if (!active) return;
+    const data = (active as unknown as { data?: { frameObject: FrameObject } }).data;
+    if (data?.frameObject) {
+      clipboardRef.current = JSON.parse(JSON.stringify(data.frameObject));
+    }
+  }, []);
+
+  const handlePaste = useCallback(async () => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas || !clipboardRef.current) return;
+    const cloned: FrameObject = {
+      ...JSON.parse(JSON.stringify(clipboardRef.current)),
+      id: crypto.randomUUID(),
+      x: (clipboardRef.current.x ?? 0) + 20,
+      y: (clipboardRef.current.y ?? 0) + 20,
+    };
+    const fabricObj = await createEditorObject(cloned);
+    if (!fabricObj) return;
+    canvas.add(fabricObj);
+    canvas.setActiveObject(fabricObj);
+    canvas.renderAll();
+    setSelectedObj(fabricObj);
+    snapshotHistory();
+  }, [snapshotHistory]);
+
+  // Export the current frame template as a PNG
+  const handleExportPng = useCallback(async () => {
+    if (!template || !fabricCanvasRef.current) return;
+    fabricCanvasRef.current.discardActiveObject();
+    fabricCanvasRef.current.renderAll();
+    const objects = extractFrameObjects(fabricCanvasRef.current);
+    const offscreen = document.createElement("canvas");
+    document.body.appendChild(offscreen);
+    let fc: Awaited<ReturnType<typeof renderFrameTemplate>> | null = null;
+    try {
+      fc = await renderFrameTemplate(offscreen, { ...template, objects }, {
+        scale: 1,
+        editorMode: true, // show photo zone placeholders
+      });
+      const dataUrl = frameToDataUrl(fc, "png", 1);
+      const link = document.createElement("a");
+      link.download = `${template.name}.png`;
+      link.href = dataUrl;
+      link.click();
+    } finally {
+      if (fc) fc.dispose();
+      if (offscreen.parentNode) offscreen.parentNode.removeChild(offscreen);
+    }
+  }, [template]);
 
   const handleSave = useCallback(async () => {
     if (!template || !fabricCanvasRef.current) return;
@@ -462,6 +598,20 @@ export default function FrameEditorPage() {
           />
           <span>Public</span>
         </label>
+
+        {/* Undo / Redo / Export */}
+        <div className="flex items-center gap-0.5 mr-2">
+          <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground" onClick={handleUndo} title="Undo (Cmd+Z)">
+            <Undo2 className="h-4 w-4" />
+          </Button>
+          <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground" onClick={handleRedo} title="Redo (Cmd+Shift+Z)">
+            <Redo2 className="h-4 w-4" />
+          </Button>
+          <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground" onClick={handleExportPng} title="Export PNG">
+            <Download className="h-4 w-4" />
+          </Button>
+        </div>
+
         <div className="flex items-center gap-1 mr-2">
           <span className="text-[10px] uppercase tracking-wider text-muted-foreground mr-1">Preview BG</span>
           <button
@@ -609,17 +759,28 @@ export default function FrameEditorPage() {
           </div>
         </div>
 
-        {/* Right: properties */}
+        {/* Right: properties + layers */}
         <div className="w-64 bg-card border-l border-border/50 p-4 overflow-y-auto">
-          <h3 className="text-sm font-medium mb-3">Properties</h3>
+          <div className="mb-5">
+            <h3 className="text-sm font-medium mb-2">Layers</h3>
+            <LayersPanel
+              canvas={fabricCanvasRef.current}
+              selectedObj={selectedObj}
+              onSelect={setSelectedObj}
+              onChange={() => { snapshotHistory(); forceUpdate({}); }}
+            />
+          </div>
+          <h3 className="text-sm font-medium mb-3 pt-3 border-t border-border/50">Properties</h3>
           {selectedObj ? (
-            <PropertiesEditor
+            <PropertiesPanel
               obj={selectedObj}
               canvasWidth={template.width}
               canvasHeight={template.height}
+              maxPhotos={template.max_photos}
               onChange={() => {
                 fabricCanvasRef.current?.renderAll();
                 forceUpdate({});
+                snapshotHistory();
               }}
               onDelete={handleDelete}
               onDuplicate={handleDuplicate}
@@ -633,307 +794,4 @@ export default function FrameEditorPage() {
       </div>
     </div>
   );
-}
-
-function PropertiesEditor({
-  obj,
-  canvasWidth,
-  canvasHeight,
-  onChange,
-  onDelete,
-  onDuplicate,
-  onLayerMove,
-  onRebuildGradient,
-}: {
-  obj: fabric.Object;
-  canvasWidth: number;
-  canvasHeight: number;
-  onChange: () => void;
-  onDelete: () => void;
-  onDuplicate: () => void;
-  onLayerMove: (dir: "up" | "down" | "top" | "bottom") => void;
-  onRebuildGradient: () => void;
-}) {
-  const data = (obj as unknown as { data?: { frameObject: FrameObject } }).data;
-  const frameObj = data?.frameObject;
-  if (!frameObj) return null;
-
-  const update = (updates: Partial<fabric.Object>) => {
-    obj.set(updates);
-    obj.setCoords();
-    onChange();
-  };
-
-  // Alignment helpers — align selected object's bounding box to canvas
-  const align = (target: "left" | "center-x" | "right" | "top" | "center-y" | "bottom") => {
-    const w = (obj.width ?? 0) * (obj.scaleX ?? 1);
-    const h = (obj.height ?? 0) * (obj.scaleY ?? 1);
-    const updates: Partial<fabric.Object> = {};
-    if (target === "left") updates.left = 0;
-    if (target === "center-x") updates.left = (canvasWidth - w) / 2;
-    if (target === "right") updates.left = canvasWidth - w;
-    if (target === "top") updates.top = 0;
-    if (target === "center-y") updates.top = (canvasHeight - h) / 2;
-    if (target === "bottom") updates.top = canvasHeight - h;
-    update(updates);
-  };
-
-  return (
-    <div className="space-y-4">
-      <div>
-        <Label className="text-xs uppercase tracking-wider text-muted-foreground">Type</Label>
-        <p className="text-sm font-medium capitalize">{frameObj.type.replace("-", " ")}</p>
-      </div>
-
-      {/* Opacity */}
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Opacity</Label>
-          <span className="text-xs tabular-nums text-muted-foreground">
-            {Math.round((obj.opacity ?? 1) * 100)}%
-          </span>
-        </div>
-        <Slider
-          value={[obj.opacity ?? 1]}
-          onValueChange={(v) => update({ opacity: Array.isArray(v) ? v[0] : v })}
-          min={0}
-          max={1}
-          step={0.01}
-        />
-      </div>
-
-      {/* Rotation */}
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Rotation</Label>
-          <span className="text-xs tabular-nums text-muted-foreground">
-            {Math.round(obj.angle ?? 0)}°
-          </span>
-        </div>
-        <Slider
-          value={[obj.angle ?? 0]}
-          onValueChange={(v) => update({ angle: Array.isArray(v) ? v[0] : v })}
-          min={-180}
-          max={180}
-          step={1}
-        />
-      </div>
-
-      {/* Layer order */}
-      <div className="space-y-2">
-        <Label className="text-xs uppercase tracking-wider text-muted-foreground">Layer Order</Label>
-        <div className="grid grid-cols-4 gap-1">
-          <Button variant="outline" size="icon" className="h-7 w-full" onClick={() => onLayerMove("top")} title="Bring to front">
-            <ChevronsUp className="h-3.5 w-3.5" />
-          </Button>
-          <Button variant="outline" size="icon" className="h-7 w-full" onClick={() => onLayerMove("up")} title="Move up">
-            <ChevronUp className="h-3.5 w-3.5" />
-          </Button>
-          <Button variant="outline" size="icon" className="h-7 w-full" onClick={() => onLayerMove("down")} title="Move down">
-            <ChevronDown className="h-3.5 w-3.5" />
-          </Button>
-          <Button variant="outline" size="icon" className="h-7 w-full" onClick={() => onLayerMove("bottom")} title="Send to back">
-            <ChevronsDown className="h-3.5 w-3.5" />
-          </Button>
-        </div>
-      </div>
-
-      {/* Alignment */}
-      <div className="space-y-2">
-        <Label className="text-xs uppercase tracking-wider text-muted-foreground">Align</Label>
-        <div className="grid grid-cols-3 gap-1">
-          <Button variant="outline" size="icon" className="h-7 w-full" onClick={() => align("left")} title="Align left">
-            <AlignLeft className="h-3.5 w-3.5" />
-          </Button>
-          <Button variant="outline" size="icon" className="h-7 w-full" onClick={() => align("center-x")} title="Center horizontally">
-            <AlignCenter className="h-3.5 w-3.5" />
-          </Button>
-          <Button variant="outline" size="icon" className="h-7 w-full" onClick={() => align("right")} title="Align right">
-            <AlignRight className="h-3.5 w-3.5" />
-          </Button>
-          <Button variant="outline" size="icon" className="h-7 w-full" onClick={() => align("top")} title="Align top">
-            <AlignStartHorizontal className="h-3.5 w-3.5" />
-          </Button>
-          <Button variant="outline" size="icon" className="h-7 w-full" onClick={() => align("center-y")} title="Center vertically">
-            <AlignCenterHorizontal className="h-3.5 w-3.5" />
-          </Button>
-          <Button variant="outline" size="icon" className="h-7 w-full" onClick={() => align("bottom")} title="Align bottom">
-            <AlignEndHorizontal className="h-3.5 w-3.5" />
-          </Button>
-        </div>
-      </div>
-
-      {/* Type-specific */}
-      {frameObj.type === "shape" && (
-        <div className="space-y-2">
-          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Fill</Label>
-          <input
-            type="color"
-            value={typeof obj.fill === "string" ? obj.fill : "#000000"}
-            onChange={(e) => {
-              update({ fill: e.target.value });
-              if (frameObj.type === "shape") frameObj.fill = e.target.value;
-            }}
-            className="w-full h-8 rounded cursor-pointer"
-          />
-        </div>
-      )}
-
-      {frameObj.type === "gradient" && (
-        <div className="space-y-3">
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground mb-2 block">Curve</Label>
-            <div className="grid grid-cols-2 gap-1">
-              {(["linear", "long-tail", "short-tail", "smooth"] as const).map((c) => (
-                <button
-                  key={c}
-                  onClick={() => {
-                    frameObj.curve = c;
-                    onRebuildGradient();
-                  }}
-                  className={`text-[10px] py-1.5 px-2 rounded border transition-colors ${
-                    (frameObj.curve || "linear") === c
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-border text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  {c.replace("-", " ")}
-                </button>
-              ))}
-            </div>
-          </div>
-          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Gradient Stops</Label>
-          {(["start", "end"] as const).map((which, idx) => {
-            const stop = frameObj.stops[idx === 0 ? 0 : frameObj.stops.length - 1];
-            const { color, alpha } = parseRgba(stop.color);
-            return (
-              <div key={which} className="space-y-2 p-2 rounded border border-border/60">
-                <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">{which}</Label>
-                <input
-                  type="color"
-                  value={color}
-                  onChange={(e) => {
-                    const newStop = formatRgba(e.target.value, alpha);
-                    if (idx === 0) frameObj.stops[0] = { ...stop, color: newStop };
-                    else frameObj.stops[frameObj.stops.length - 1] = { ...stop, color: newStop };
-                    onRebuildGradient();
-                  }}
-                  className="w-full h-8 rounded cursor-pointer"
-                />
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] text-muted-foreground">Opacity</span>
-                  <span className="text-[10px] tabular-nums text-muted-foreground">{Math.round(alpha * 100)}%</span>
-                </div>
-                <Slider
-                  value={[alpha]}
-                  onValueChange={(v) => {
-                    const a = Array.isArray(v) ? v[0] : v;
-                    const newStop = formatRgba(color, a);
-                    if (idx === 0) frameObj.stops[0] = { ...stop, color: newStop };
-                    else frameObj.stops[frameObj.stops.length - 1] = { ...stop, color: newStop };
-                    onRebuildGradient();
-                  }}
-                  min={0}
-                  max={1}
-                  step={0.01}
-                />
-              </div>
-            );
-          })}
-          <div className="space-y-1">
-            <div className="flex items-center justify-between">
-              <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Angle</Label>
-              <span className="text-[10px] tabular-nums text-muted-foreground">{frameObj.angle}°</span>
-            </div>
-            <Slider
-              value={[frameObj.angle]}
-              onValueChange={(v) => {
-                frameObj.angle = Array.isArray(v) ? v[0] : v;
-                onRebuildGradient();
-              }}
-              min={0}
-              max={360}
-              step={1}
-            />
-          </div>
-        </div>
-      )}
-
-      {frameObj.type === "text-zone" && obj instanceof fabric.Textbox && (
-        <>
-          <div className="space-y-2">
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Color</Label>
-            <input
-              type="color"
-              value={typeof obj.fill === "string" ? obj.fill : "#ffffff"}
-              onChange={(e) => {
-                update({ fill: e.target.value });
-                (frameObj as { color: string }).color = e.target.value;
-              }}
-              className="w-full h-8 rounded cursor-pointer"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Font Size</Label>
-            <Slider
-              value={[obj.fontSize ?? 24]}
-              onValueChange={(v) => {
-                const size = Array.isArray(v) ? v[0] : v;
-                obj.set({ fontSize: size });
-                (frameObj as { fontSize: number }).fontSize = size;
-                onChange();
-              }}
-              min={8}
-              max={200}
-              step={1}
-            />
-          </div>
-        </>
-      )}
-
-      <div className="grid grid-cols-2 gap-2 pt-2">
-        <Button variant="outline" size="sm" onClick={onDuplicate}>
-          <Copy className="h-3 w-3 mr-1" />
-          Duplicate
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          className="text-destructive"
-          onClick={onDelete}
-        >
-          <Trash2 className="h-3 w-3 mr-1" />
-          Delete
-        </Button>
-      </div>
-
-      <div className="pt-2 border-t border-border/50">
-        <p className="text-[10px] text-muted-foreground">
-          Tip: drag to move, drag corners to resize, drag the top handle to rotate.
-        </p>
-      </div>
-    </div>
-  );
-}
-
-// rgba/hex helpers for gradient stops
-function parseRgba(str: string): { color: string; alpha: number } {
-  if (str.startsWith("#")) {
-    return { color: str.length === 9 ? str.slice(0, 7) : str, alpha: str.length === 9 ? parseInt(str.slice(7), 16) / 255 : 1 };
-  }
-  const m = str.match(/rgba?\(([^)]+)\)/);
-  if (!m) return { color: "#000000", alpha: 1 };
-  const parts = m[1].split(",").map((p) => parseFloat(p.trim()));
-  const [r, g, b, a = 1] = parts;
-  const hex = "#" + [r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("");
-  return { color: hex, alpha: a };
-}
-
-function formatRgba(hex: string, alpha: number): string {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  // Clamp alpha so 0 stays 0 (some renderers treat very small alpha as opaque)
-  const a = Math.max(0, Math.min(1, alpha));
-  return `rgba(${r},${g},${b},${a})`;
 }
