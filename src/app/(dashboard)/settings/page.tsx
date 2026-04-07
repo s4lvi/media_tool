@@ -146,7 +146,7 @@ export default function SettingsPage() {
 
   if (loading) {
     return (
-      <div className="p-8 flex items-center justify-center min-h-[60vh]">
+      <div className="p-4 sm:p-8 flex items-center justify-center min-h-[60vh]">
         <div className="h-8 w-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
       </div>
     );
@@ -155,7 +155,7 @@ export default function SettingsPage() {
   const activeOrg = orgs.find((o) => o.id === activeOrgId);
 
   return (
-    <div className="p-8 max-w-4xl mx-auto">
+    <div className="p-4 sm:p-8 max-w-4xl mx-auto">
       <h1 className="text-2xl font-semibold mb-6">Settings</h1>
 
       {/* Organizations */}

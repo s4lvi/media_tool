@@ -40,7 +40,7 @@ export default function PostsPage() {
 
   if (loading) {
     return (
-      <div className="p-8 flex items-center justify-center min-h-[60vh]">
+      <div className="p-4 sm:p-8 flex items-center justify-center min-h-[60vh]">
         <div className="h-8 w-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
       </div>
     );
@@ -49,7 +49,7 @@ export default function PostsPage() {
   // Empty state with onboarding
   if (posts.length === 0) {
     return (
-      <div className="p-8 max-w-3xl mx-auto">
+      <div className="p-4 sm:p-8 max-w-3xl mx-auto">
         <div className="text-center py-12">
           <h1 className="text-3xl font-bold mb-3">Welcome to Media Tool</h1>
           <p className="text-muted-foreground text-lg mb-8">
@@ -111,7 +111,7 @@ export default function PostsPage() {
   }
 
   return (
-    <div className="p-8">
+    <div className="p-4 sm:p-8">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-semibold">Posts</h1>
       </div>

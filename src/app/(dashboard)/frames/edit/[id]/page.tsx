@@ -576,6 +576,20 @@ export default function FrameEditorPage() {
 
   return (
     <div className="h-screen flex flex-col bg-background">
+      {/* Mobile fallback */}
+      <div className="md:hidden p-8 text-center flex-1 flex flex-col items-center justify-center gap-4">
+        <h2 className="text-lg font-semibold">Frame Editor</h2>
+        <p className="text-sm text-muted-foreground max-w-xs">
+          The frame editor needs more screen space than your phone has. Open this page on a tablet
+          or desktop to build templates.
+        </p>
+        <Link href="/frames" className="text-sm text-primary underline">
+          Back to frames
+        </Link>
+      </div>
+
+      {/* Desktop editor */}
+      <div className="hidden md:flex md:flex-col md:flex-1">
       {/* Top toolbar */}
       <div className="h-12 border-b border-border/50 bg-card flex items-center px-3 gap-3">
         <Link href="/frames">
@@ -791,6 +805,7 @@ export default function FrameEditorPage() {
             <p className="text-xs text-muted-foreground">Select an object to edit its properties.</p>
           )}
         </div>
+      </div>
       </div>
     </div>
   );

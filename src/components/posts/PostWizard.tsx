@@ -308,7 +308,7 @@ export default function PostWizard({ initialPost }: PostWizardProps) {
   }, [selectedTemplate, getRenderPhotoUrls, heading, subheading, postName]);
 
   return (
-    <div className="p-8 max-w-5xl mx-auto">
+    <div className="p-4 sm:p-8 max-w-5xl mx-auto">
       {/* Header */}
       <div className="flex items-center gap-4 mb-6">
         <Link href="/posts">
