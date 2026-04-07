@@ -16,19 +16,25 @@ export async function exportVideoWithFrame(
   format: "webm" | "mp4" = "webm",
   onProgress?: (pct: number) => void
 ): Promise<Blob> {
-  // 1. Set up the source video element. It MUST be in the DOM and ready.
+  // 1. Set up the source video element. It MUST be in the DOM AND visible
+  // (some browsers refuse to decode/paint truly offscreen video elements).
+  // Position it in the viewport but tiny + nearly invisible.
   const video = document.createElement("video");
-  video.src = videoUrl;
   video.crossOrigin = "anonymous";
-  video.muted = true; // muted is required for autoplay-without-gesture rules
+  video.muted = true; // required for autoplay-without-gesture
   video.playsInline = true;
   video.preload = "auto";
   video.style.position = "fixed";
-  video.style.left = "-99999px";
-  video.style.top = "0";
-  video.style.width = "1px";
-  video.style.height = "1px";
+  video.style.left = "0px";
+  video.style.top = "0px";
+  video.style.width = "2px";
+  video.style.height = "2px";
+  video.style.opacity = "0.01";
+  video.style.pointerEvents = "none";
+  video.style.zIndex = "-1";
   document.body.appendChild(video);
+  // Set src AFTER appending so the load triggers properly in all browsers
+  video.src = videoUrl;
 
   try {
     // Wait for enough data to play through
@@ -181,17 +187,35 @@ async function encodeWebm(
       reject(e);
     };
 
-    function loop() {
-      if (stopped) return;
+    // Prefer requestVideoFrameCallback when available — fires only when a
+    // new video frame is actually decoded and ready. Falls back to RAF.
+    const hasRVFC =
+      typeof (video as HTMLVideoElement & {
+        requestVideoFrameCallback?: (cb: (now: number, metadata: { mediaTime: number }) => void) => number;
+      }).requestVideoFrameCallback === "function";
+
+    function paint() {
       drawFrame();
       if (onProgress && duration > 0) {
         onProgress(Math.min(1, video.currentTime / duration));
       }
-      requestAnimationFrame(loop);
+    }
+
+    function videoFrameLoop() {
+      if (stopped) return;
+      paint();
+      (video as HTMLVideoElement & {
+        requestVideoFrameCallback: (cb: () => void) => number;
+      }).requestVideoFrameCallback(() => videoFrameLoop());
+    }
+
+    function rafLoop() {
+      if (stopped) return;
+      paint();
+      requestAnimationFrame(rafLoop);
     }
 
     video.onended = () => {
-      // Give recorder a moment to flush
       setTimeout(() => {
         if (recorder.state === "recording") recorder.stop();
       }, 200);
@@ -201,8 +225,12 @@ async function encodeWebm(
     video
       .play()
       .then(() => {
-        recorder.start(100); // emit chunks every 100ms
-        loop();
+        recorder.start(100);
+        if (hasRVFC) {
+          videoFrameLoop();
+        } else {
+          rafLoop();
+        }
       })
       .catch(reject);
   });
@@ -316,17 +344,17 @@ async function encodeMp4(
     let frameIndex = 0;
     const frameDurationUs = Math.round(1_000_000 / fps);
 
-    async function loop() {
-      if (stopped) return;
+    function tick(): boolean {
+      if (stopped) return false;
       if (encoderError) {
         stopped = true;
         reject(encoderError instanceof Error ? encoderError : new Error(String(encoderError)));
-        return;
+        return false;
       }
       if (encoder.state !== "configured") {
         stopped = true;
         reject(new Error(`VideoEncoder state is ${encoder.state}, not configured`));
-        return;
+        return false;
       }
       try {
         drawFrame();
@@ -345,9 +373,26 @@ async function encodeMp4(
       } catch (e) {
         stopped = true;
         reject(e);
-        return;
+        return false;
       }
-      requestAnimationFrame(loop);
+      return true;
+    }
+
+    const hasRVFC =
+      typeof (video as HTMLVideoElement & {
+        requestVideoFrameCallback?: (cb: () => void) => number;
+      }).requestVideoFrameCallback === "function";
+
+    function videoFrameLoop() {
+      if (!tick()) return;
+      (video as HTMLVideoElement & {
+        requestVideoFrameCallback: (cb: () => void) => number;
+      }).requestVideoFrameCallback(() => videoFrameLoop());
+    }
+
+    function rafLoop() {
+      if (!tick()) return;
+      requestAnimationFrame(rafLoop);
     }
 
     video.onended = async () => {
@@ -368,7 +413,8 @@ async function encodeMp4(
     video
       .play()
       .then(() => {
-        loop();
+        if (hasRVFC) videoFrameLoop();
+        else rafLoop();
       })
       .catch(reject);
   });
