@@ -261,7 +261,7 @@ export default function PostWizard({ initialPost }: PostWizardProps) {
 
   const videoPhoto = photos.find((p) => p.isVideo);
 
-  const handleExportVideo = useCallback(async () => {
+  const handleExportVideo = useCallback(async (format: "webm" | "mp4") => {
     if (!selectedTemplate || !videoPhoto) return;
     setVideoExportProgress(0);
     try {
@@ -270,9 +270,10 @@ export default function PostWizard({ initialPost }: PostWizardProps) {
         selectedTemplate,
         videoUrl,
         { heading, subheading },
+        format,
         (pct) => setVideoExportProgress(pct)
       );
-      downloadBlob(blob, `${postName}.webm`);
+      downloadBlob(blob, `${postName}.${format}`);
     } catch (e) {
       console.error("Video export failed:", e);
       alert("Video export failed: " + (e instanceof Error ? e.message : String(e)));
@@ -599,17 +600,27 @@ export default function PostWizard({ initialPost }: PostWizardProps) {
                 {saving ? "Saving..." : postId ? "Save Changes" : "Save Post"}
               </Button>
               {videoPhoto ? (
-                <Button
-                  onClick={handleExportVideo}
-                  variant="outline"
-                  className="w-full"
-                  disabled={videoExportProgress !== null}
-                >
-                  <Download className="h-4 w-4 mr-2" />
-                  {videoExportProgress !== null
-                    ? `Rendering ${Math.round(videoExportProgress * 100)}%`
-                    : "Download Video (WebM)"}
-                </Button>
+                <>
+                  <Button
+                    onClick={() => handleExportVideo("mp4")}
+                    variant="outline"
+                    className="w-full"
+                    disabled={videoExportProgress !== null}
+                  >
+                    <Download className="h-4 w-4 mr-2" />
+                    {videoExportProgress !== null
+                      ? `Rendering ${Math.round(videoExportProgress * 100)}%`
+                      : "Download MP4"}
+                  </Button>
+                  <Button
+                    onClick={() => handleExportVideo("webm")}
+                    variant="ghost"
+                    className="w-full text-xs text-muted-foreground"
+                    disabled={videoExportProgress !== null}
+                  >
+                    Download WebM
+                  </Button>
+                </>
               ) : (
                 <Button onClick={handleExport} variant="outline" className="w-full">
                   <Download className="h-4 w-4 mr-2" />

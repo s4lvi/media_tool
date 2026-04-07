@@ -1,108 +1,160 @@
 import * as fabric from "fabric";
 import type { FrameTemplate } from "@/types/frame-template";
 import { renderFrameTemplate } from "./renderer";
+import { Muxer, ArrayBufferTarget } from "mp4-muxer";
 
 /**
  * Export a video by playing the user's video into a canvas, compositing
- * the frame template overlay, and capturing via MediaRecorder.
+ * the frame template overlay, and capturing.
  *
- * Returns a WebM blob.
+ * Returns a video blob (WebM via MediaRecorder, or MP4 via WebCodecs+mp4-muxer).
  */
 export async function exportVideoWithFrame(
   template: FrameTemplate,
   videoUrl: string,
   texts: { heading?: string; subheading?: string },
+  format: "webm" | "mp4" = "webm",
   onProgress?: (pct: number) => void
 ): Promise<Blob> {
-  // 1. Create the video element
+  // 1. Set up the source video element. It MUST be in the DOM and ready.
   const video = document.createElement("video");
   video.src = videoUrl;
   video.crossOrigin = "anonymous";
-  video.muted = false;
+  video.muted = true; // muted is required for autoplay-without-gesture rules
   video.playsInline = true;
   video.preload = "auto";
-  await new Promise<void>((resolve, reject) => {
-    video.onloadedmetadata = () => resolve();
-    video.onerror = () => reject(new Error("Failed to load video"));
-  });
+  video.style.position = "fixed";
+  video.style.left = "-99999px";
+  video.style.top = "0";
+  video.style.width = "1px";
+  video.style.height = "1px";
+  document.body.appendChild(video);
 
-  const duration = video.duration;
-  if (!isFinite(duration) || duration <= 0) {
-    throw new Error("Could not determine video duration");
-  }
-
-  // 2. Pre-render the frame overlay (everything EXCEPT the photo zones)
-  // The photo zones will be filled by the video at draw time.
-  const overlayCanvas = document.createElement("canvas");
-  document.body.appendChild(overlayCanvas);
-  overlayCanvas.style.position = "fixed";
-  overlayCanvas.style.left = "-99999px";
-  let overlayFabric: fabric.Canvas | null = null;
   try {
-    // Render the template with NO photos. This produces a transparent canvas
-    // with the frame decorations on top.
-    overlayFabric = await renderFrameTemplate(overlayCanvas, template, {
-      scale: 1,
-      photos: [], // photo zones will be skipped (they get an editor placeholder
-                  // only in editorMode, otherwise blank)
-      texts,
-      editorMode: false,
+    // Wait for enough data to play through
+    await new Promise<void>((resolve, reject) => {
+      const onReady = () => {
+        video.removeEventListener("canplaythrough", onReady);
+        video.removeEventListener("error", onError);
+        resolve();
+      };
+      const onError = () => {
+        video.removeEventListener("canplaythrough", onReady);
+        video.removeEventListener("error", onError);
+        reject(new Error("Failed to load video"));
+      };
+      video.addEventListener("canplaythrough", onReady);
+      video.addEventListener("error", onError);
+      // If already loaded
+      if (video.readyState >= 4) {
+        video.removeEventListener("canplaythrough", onReady);
+        video.removeEventListener("error", onError);
+        resolve();
+      }
     });
-  } catch (e) {
-    if (overlayFabric) overlayFabric.dispose();
-    if (overlayCanvas.parentNode) overlayCanvas.parentNode.removeChild(overlayCanvas);
-    throw e;
+
+    const duration = video.duration;
+    if (!isFinite(duration) || duration <= 0) {
+      throw new Error("Could not determine video duration");
+    }
+
+    // 2. Pre-render the frame overlay (everything EXCEPT the photo zones)
+    const overlayCanvas = document.createElement("canvas");
+    overlayCanvas.style.position = "fixed";
+    overlayCanvas.style.left = "-99999px";
+    document.body.appendChild(overlayCanvas);
+    let overlayFabric: fabric.Canvas | null = null;
+    let overlayDataUrl: string;
+    try {
+      overlayFabric = await renderFrameTemplate(overlayCanvas, template, {
+        scale: 1,
+        photos: [],
+        texts,
+        editorMode: false,
+      });
+      overlayDataUrl = overlayCanvas.toDataURL("image/png");
+    } finally {
+      if (overlayFabric) overlayFabric.dispose();
+      if (overlayCanvas.parentNode) overlayCanvas.parentNode.removeChild(overlayCanvas);
+    }
+
+    const overlayImg = new Image();
+    overlayImg.src = overlayDataUrl;
+    await new Promise<void>((resolve, reject) => {
+      overlayImg.onload = () => resolve();
+      overlayImg.onerror = () => reject(new Error("Overlay load failed"));
+    });
+
+    // 3. Find the first photo zone in the template
+    const photoZone = template.objects.find((o) => o.type === "photo-zone");
+    if (!photoZone) throw new Error("Template has no photo zone for the video");
+    const pz = photoZone as { x: number; y: number; width: number; height: number };
+
+    // 4. Create the export canvas at template dimensions
+    const exportCanvas = document.createElement("canvas");
+    exportCanvas.width = template.width;
+    exportCanvas.height = template.height;
+    const ctx = exportCanvas.getContext("2d", { alpha: false })!;
+
+    function drawFrame() {
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
+
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (vw && vh) {
+        const sx = pz.width / vw;
+        const sy = pz.height / vh;
+        const s = Math.max(sx, sy) * 1.005;
+        const dw = vw * s;
+        const dh = vh * s;
+        const dx = pz.x + (pz.width - dw) / 2;
+        const dy = pz.y + (pz.height - dh) / 2;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(pz.x, pz.y, pz.width, pz.height);
+        ctx.clip();
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(video, dx, dy, dw, dh);
+        ctx.restore();
+      }
+
+      ctx.drawImage(overlayImg, 0, 0, exportCanvas.width, exportCanvas.height);
+    }
+
+    if (format === "mp4") {
+      return await encodeMp4(exportCanvas, video, drawFrame, duration, onProgress);
+    } else {
+      return await encodeWebm(exportCanvas, video, drawFrame, duration, onProgress);
+    }
+  } finally {
+    if (video.parentNode) video.parentNode.removeChild(video);
   }
+}
 
-  // Convert overlay to an HTMLImageElement we can draw each frame
-  const overlayDataUrl = overlayCanvas.toDataURL("image/png");
-  overlayFabric.dispose();
-  if (overlayCanvas.parentNode) overlayCanvas.parentNode.removeChild(overlayCanvas);
+/**
+ * WebM via MediaRecorder + canvas captureStream.
+ */
+async function encodeWebm(
+  exportCanvas: HTMLCanvasElement,
+  video: HTMLVideoElement,
+  drawFrame: () => void,
+  duration: number,
+  onProgress?: (pct: number) => void
+): Promise<Blob> {
+  // captureStream needs at least one paint before it'll deliver frames
+  drawFrame();
 
-  const overlayImg = new Image();
-  overlayImg.src = overlayDataUrl;
-  await new Promise((r) => (overlayImg.onload = r));
-
-  // 3. Find the first photo zone in the template — that's where the video goes
-  const photoZone = template.objects.find((o) => o.type === "photo-zone");
-  if (!photoZone) {
-    throw new Error("Template has no photo zone for the video");
-  }
-
-  // 4. Create the export canvas at template dimensions
-  const exportCanvas = document.createElement("canvas");
-  exportCanvas.width = template.width;
-  exportCanvas.height = template.height;
-  const ctx = exportCanvas.getContext("2d", { alpha: false })!;
-
-  // 5. Set up MediaRecorder capturing the canvas
   const fps = 30;
-  // captureStream gives us a MediaStream we can mix audio into
   const canvasStream = (exportCanvas as HTMLCanvasElement & {
-    captureStream: (fps: number) => MediaStream;
+    captureStream: (fps?: number) => MediaStream;
   }).captureStream(fps);
 
-  // Try to get audio from the source video and add to the stream
-  try {
-    const videoStream = (video as HTMLVideoElement & {
-      captureStream?: () => MediaStream;
-      mozCaptureStream?: () => MediaStream;
-    }).captureStream?.() || (video as HTMLVideoElement & {
-      captureStream?: () => MediaStream;
-      mozCaptureStream?: () => MediaStream;
-    }).mozCaptureStream?.();
-    if (videoStream) {
-      const audioTracks = videoStream.getAudioTracks();
-      audioTracks.forEach((t) => canvasStream.addTrack(t));
-    }
-  } catch {
-    // Audio capture failed; export will be silent
-  }
-
-  // Pick a supported MIME type
+  // Pick a supported codec
   const mimeCandidates = [
-    "video/webm;codecs=vp9,opus",
-    "video/webm;codecs=vp8,opus",
+    "video/webm;codecs=vp9",
+    "video/webm;codecs=vp8",
     "video/webm",
   ];
   const mimeType = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) || "video/webm";
@@ -117,67 +169,142 @@ export async function exportVideoWithFrame(
     if (e.data.size > 0) chunks.push(e.data);
   };
 
-  // 6. Compute photo zone draw geometry once (cover-fit)
-  const pz = photoZone as { x: number; y: number; width: number; height: number };
-  function drawFrame() {
-    // Clear
-    ctx.fillStyle = "#000";
-    ctx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
-
-    // Cover-fit the video into the photo zone
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
-    if (vw && vh) {
-      const sx = pz.width / vw;
-      const sy = pz.height / vh;
-      const s = Math.max(sx, sy) * 1.005;
-      const dw = vw * s;
-      const dh = vh * s;
-      const dx = pz.x + (pz.width - dw) / 2;
-      const dy = pz.y + (pz.height - dh) / 2;
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(pz.x, pz.y, pz.width, pz.height);
-      ctx.clip();
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = "high";
-      ctx.drawImage(video, dx, dy, dw, dh);
-      ctx.restore();
-    }
-
-    // Draw the static frame overlay on top
-    ctx.drawImage(overlayImg, 0, 0, exportCanvas.width, exportCanvas.height);
-  }
-
-  // 7. Animation loop tied to requestAnimationFrame, runs while video plays
-  let stopped = false;
-  function loop() {
-    if (stopped) return;
-    drawFrame();
-    if (onProgress && duration > 0) {
-      onProgress(Math.min(1, video.currentTime / duration));
-    }
-    requestAnimationFrame(loop);
-  }
-
   return new Promise<Blob>((resolve, reject) => {
+    let stopped = false;
+
     recorder.onstop = () => {
       stopped = true;
-      const blob = new Blob(chunks, { type: mimeType });
-      resolve(blob);
+      resolve(new Blob(chunks, { type: mimeType }));
     };
-    recorder.onerror = (e) => reject(e);
+    recorder.onerror = (e) => {
+      stopped = true;
+      reject(e);
+    };
+
+    function loop() {
+      if (stopped) return;
+      drawFrame();
+      if (onProgress && duration > 0) {
+        onProgress(Math.min(1, video.currentTime / duration));
+      }
+      requestAnimationFrame(loop);
+    }
 
     video.onended = () => {
-      // Give the recorder a moment to flush the last frame
-      setTimeout(() => recorder.stop(), 100);
+      // Give recorder a moment to flush
+      setTimeout(() => {
+        if (recorder.state === "recording") recorder.stop();
+      }, 200);
     };
 
     video.currentTime = 0;
     video
       .play()
       .then(() => {
-        recorder.start();
+        recorder.start(100); // emit chunks every 100ms
+        loop();
+      })
+      .catch(reject);
+  });
+}
+
+/**
+ * MP4 via WebCodecs VideoEncoder + mp4-muxer. Modern browsers only.
+ */
+async function encodeMp4(
+  exportCanvas: HTMLCanvasElement,
+  video: HTMLVideoElement,
+  drawFrame: () => void,
+  duration: number,
+  onProgress?: (pct: number) => void
+): Promise<Blob> {
+  if (typeof VideoEncoder === "undefined") {
+    throw new Error("MP4 export requires WebCodecs API (Chrome/Edge/Safari 16.4+)");
+  }
+
+  const fps = 30;
+  const width = exportCanvas.width;
+  const height = exportCanvas.height;
+
+  // mp4-muxer setup
+  const muxer = new Muxer({
+    target: new ArrayBufferTarget(),
+    video: {
+      codec: "avc",
+      width,
+      height,
+      frameRate: fps,
+    },
+    fastStart: "in-memory",
+  });
+
+  // VideoEncoder setup — H.264 baseline so it plays everywhere
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => {
+      muxer.addVideoChunk(chunk, meta);
+    },
+    error: (e) => {
+      console.error("VideoEncoder error:", e);
+    },
+  });
+
+  encoder.configure({
+    codec: "avc1.42001f", // H.264 Baseline 3.1
+    width,
+    height,
+    bitrate: 8_000_000,
+    framerate: fps,
+  });
+
+  // Play the video and encode frames
+  return new Promise<Blob>((resolve, reject) => {
+    let stopped = false;
+    let frameIndex = 0;
+    const frameDurationUs = Math.round(1_000_000 / fps);
+
+    async function loop() {
+      if (stopped) return;
+      try {
+        drawFrame();
+        const timestamp = frameIndex * frameDurationUs;
+        // Create a VideoFrame from the canvas
+        const vf = new VideoFrame(exportCanvas, {
+          timestamp,
+          duration: frameDurationUs,
+        });
+        const keyFrame = frameIndex % (fps * 2) === 0;
+        encoder.encode(vf, { keyFrame });
+        vf.close();
+        frameIndex++;
+        if (onProgress && duration > 0) {
+          onProgress(Math.min(1, video.currentTime / duration));
+        }
+      } catch (e) {
+        stopped = true;
+        reject(e);
+        return;
+      }
+      requestAnimationFrame(loop);
+    }
+
+    video.onended = async () => {
+      stopped = true;
+      try {
+        await encoder.flush();
+        encoder.close();
+        muxer.finalize();
+        const target = muxer.target as ArrayBufferTarget;
+        const blob = new Blob([target.buffer], { type: "video/mp4" });
+        resolve(blob);
+      } catch (e) {
+        reject(e);
+      }
+    };
+
+    video.currentTime = 0;
+    video
+      .play()
+      .then(() => {
         loop();
       })
       .catch(reject);
@@ -198,6 +325,5 @@ export function isVideoFile(file: File): boolean {
 }
 
 export function isVideoUrl(url: string): boolean {
-  // best-effort check
   return /\.(mp4|mov|webm|m4v|avi)(\?|$)/i.test(url);
 }
