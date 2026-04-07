@@ -347,6 +347,7 @@ export default function FrameEditorPage() {
         height: template.height,
         min_photos: template.min_photos,
         max_photos: template.max_photos,
+        is_public: template.is_public,
         objects,
         thumbnail_url: thumbnail,
         updated_at: new Date().toISOString(),
@@ -452,6 +453,15 @@ export default function FrameEditorPage() {
           className="h-7 w-64 text-sm bg-muted border-none"
         />
         <div className="flex-1" />
+        <label className="flex items-center gap-1.5 text-xs cursor-pointer mr-3 text-muted-foreground hover:text-foreground">
+          <input
+            type="checkbox"
+            checked={template.is_public}
+            onChange={(e) => setTemplate({ ...template, is_public: e.target.checked })}
+            className="rounded"
+          />
+          <span>Public</span>
+        </label>
         <div className="flex items-center gap-1 mr-2">
           <span className="text-[10px] uppercase tracking-wider text-muted-foreground mr-1">Preview BG</span>
           <button

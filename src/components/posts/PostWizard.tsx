@@ -60,6 +60,7 @@ export default function PostWizard({ initialPost }: PostWizardProps) {
   const [saving, setSaving] = useState(false);
   const [postId, setPostId] = useState<string | null>(initialPost?.id || null);
   const [postName, setPostName] = useState(initialPost?.name || "Untitled Post");
+  const [isPublic, setIsPublic] = useState(initialPost?.is_public || false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Track all object URLs for cleanup
@@ -229,6 +230,7 @@ export default function PostWizard({ initialPost }: PostWizardProps) {
         photo_refs: photoRefs,
         text_content: { heading, subheading },
         thumbnail_url: previewDataUrl,
+        is_public: isPublic,
         canvas_json: {},
       };
 
@@ -539,6 +541,15 @@ export default function PostWizard({ initialPost }: PostWizardProps) {
                 <div><strong className="text-foreground">Subheading:</strong> {subheading || "—"}</div>
                 <div><strong className="text-foreground">Size:</strong> {selectedTemplate?.width}x{selectedTemplate?.height}</div>
               </div>
+              <label className="flex items-center gap-2 text-xs cursor-pointer pt-2 border-t border-border/50">
+                <input
+                  type="checkbox"
+                  checked={isPublic}
+                  onChange={(e) => setIsPublic(e.target.checked)}
+                  className="rounded"
+                />
+                <span>Public — visible to all users</span>
+              </label>
             </div>
             <div className="space-y-2">
               <Button onClick={handleSave} disabled={saving} className="w-full">

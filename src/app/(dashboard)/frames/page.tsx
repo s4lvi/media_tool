@@ -6,9 +6,8 @@ import { createClient } from "@/lib/supabase/client";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Plus, Trash2, Pencil, Sparkles } from "lucide-react";
+import { Plus, Trash2, Pencil } from "lucide-react";
 import type { FrameTemplate } from "@/types/frame-template";
-import { SEED_TEMPLATES } from "@/lib/frames/seed-templates";
 import { renderFrameTemplate, frameToDataUrl } from "@/lib/frames/renderer";
 
 export default function FramesPage() {
@@ -33,74 +32,6 @@ export default function FramesPage() {
     const supabase = createClient();
     await supabase.from("frame_templates").delete().eq("id", id);
     setTemplates((prev) => prev.filter((t) => t.id !== id));
-  }
-
-  async function seedDefaults() {
-    setSeeding(true);
-    const supabase = createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) {
-      setSeeding(false);
-      return;
-    }
-    const { data: membership } = await supabase
-      .from("organization_members")
-      .select("organization_id")
-      .eq("user_id", user.id)
-      .single();
-    if (!membership) {
-      setSeeding(false);
-      return;
-    }
-
-    // Skip any templates that already exist by name
-    const existingNames = new Set(templates.map((t) => t.name));
-    const toInsert = SEED_TEMPLATES.filter((t) => !existingNames.has(t.name)).map((t) => ({
-      ...t,
-      organization_id: membership.organization_id,
-      created_by: user.id,
-    }));
-
-    if (toInsert.length === 0) {
-      setSeeding(false);
-      return;
-    }
-
-    const { data: inserted } = await supabase
-      .from("frame_templates")
-      .insert(toInsert)
-      .select();
-
-    if (inserted) {
-      setTemplates((prev) => [...inserted, ...prev]);
-
-      // Generate thumbnails in the background and update rows
-      for (const tmpl of inserted as FrameTemplate[]) {
-        try {
-          const offscreen = document.createElement("canvas");
-          document.body.appendChild(offscreen);
-          const fc = await renderFrameTemplate(offscreen, tmpl, {
-            scale: 0.3,
-            editorMode: true,
-          });
-          const dataUrl = frameToDataUrl(fc, "jpeg", 0.7);
-          fc.dispose();
-          if (offscreen.parentNode) offscreen.parentNode.removeChild(offscreen);
-
-          await supabase
-            .from("frame_templates")
-            .update({ thumbnail_url: dataUrl })
-            .eq("id", tmpl.id);
-
-          setTemplates((prev) =>
-            prev.map((t) => (t.id === tmpl.id ? { ...t, thumbnail_url: dataUrl } : t))
-          );
-        } catch (e) {
-          console.error("Thumbnail gen failed for", tmpl.name, e);
-        }
-      }
-    }
-    setSeeding(false);
   }
 
   // Regenerate thumbnails for templates that are missing them
@@ -154,10 +85,6 @@ export default function FramesPage() {
               {seeding ? "Generating..." : "Generate Thumbnails"}
             </Button>
           )}
-          <Button variant="outline" onClick={seedDefaults} disabled={seeding}>
-            <Sparkles className="h-4 w-4 mr-1" />
-            {seeding ? "Seeding..." : "Seed Defaults"}
-          </Button>
           <Link href="/frames/edit/new" className={buttonVariants()}>
             <Plus className="h-4 w-4 mr-1" />
             New Frame

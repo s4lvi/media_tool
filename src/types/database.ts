@@ -41,6 +41,7 @@ export interface Post {
   photo_refs: string[];
   text_content: { heading?: string; subheading?: string; [key: string]: string | undefined };
   thumbnail_url: string | null;
+  is_public: boolean;
   created_at: string;
   updated_at: string;
 }
