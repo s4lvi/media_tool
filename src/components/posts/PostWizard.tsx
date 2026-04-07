@@ -6,6 +6,7 @@ import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { renderFrameTemplate, frameToDataUrl } from "@/lib/frames/renderer";
 import { resolveAssetPath, makeAssetRef, isAssetRef } from "@/lib/frames/asset-resolver";
+import { exportVideoWithFrame, downloadBlob, isVideoFile, isVideoUrl } from "@/lib/frames/video-export";
 import { ASPECT_RATIO_PRESETS } from "@/types/editor";
 import { uploadFile, getStoragePath } from "@/lib/supabase/storage";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -35,6 +36,7 @@ interface PhotoItem {
   file?: File;
   ref?: string;        // assets://bucket/path
   previewUrl: string;  // local blob: or signed URL for display
+  isVideo?: boolean;
 }
 
 export default function PostWizard({ initialPost }: PostWizardProps) {
@@ -61,6 +63,7 @@ export default function PostWizard({ initialPost }: PostWizardProps) {
   const [postId, setPostId] = useState<string | null>(initialPost?.id || null);
   const [postName, setPostName] = useState(initialPost?.name || "Untitled Post");
   const [isPublic, setIsPublic] = useState(initialPost?.is_public || false);
+  const [videoExportProgress, setVideoExportProgress] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Track all object URLs for cleanup
@@ -95,7 +98,11 @@ export default function PostWizard({ initialPost }: PostWizardProps) {
       const items = await Promise.all(
         refs.map(async (ref) => {
           const previewUrl = await resolveAssetPath(ref);
-          return { ref, previewUrl } as PhotoItem;
+          return {
+            ref,
+            previewUrl,
+            isVideo: isVideoUrl(ref) || isVideoUrl(previewUrl),
+          } as PhotoItem;
         })
       );
       setPhotos(items);
@@ -107,8 +114,12 @@ export default function PostWizard({ initialPost }: PostWizardProps) {
   const handleAddPhotos = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     const newPhotos: PhotoItem[] = files
-      .filter((f) => f.type.startsWith("image/"))
-      .map((f) => ({ file: f, previewUrl: URL.createObjectURL(f) }));
+      .filter((f) => f.type.startsWith("image/") || f.type.startsWith("video/"))
+      .map((f) => ({
+        file: f,
+        previewUrl: URL.createObjectURL(f),
+        isVideo: isVideoFile(f),
+      }));
     setPhotos((prev) => [...prev, ...newPhotos]);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }, []);
@@ -248,6 +259,28 @@ export default function PostWizard({ initialPost }: PostWizardProps) {
     }
   }, [selectedTemplate, postName, postId, heading, subheading, previewDataUrl, ensurePersistentPhotos]);
 
+  const videoPhoto = photos.find((p) => p.isVideo);
+
+  const handleExportVideo = useCallback(async () => {
+    if (!selectedTemplate || !videoPhoto) return;
+    setVideoExportProgress(0);
+    try {
+      const videoUrl = videoPhoto.ref ? await resolveAssetPath(videoPhoto.ref) : videoPhoto.previewUrl;
+      const blob = await exportVideoWithFrame(
+        selectedTemplate,
+        videoUrl,
+        { heading, subheading },
+        (pct) => setVideoExportProgress(pct)
+      );
+      downloadBlob(blob, `${postName}.webm`);
+    } catch (e) {
+      console.error("Video export failed:", e);
+      alert("Video export failed: " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setVideoExportProgress(null);
+    }
+  }, [selectedTemplate, videoPhoto, heading, subheading, postName]);
+
   // Export PNG at full resolution
   const handleExport = useCallback(async () => {
     if (!selectedTemplate) return;
@@ -331,7 +364,7 @@ export default function PostWizard({ initialPost }: PostWizardProps) {
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
+            accept="image/*,video/*"
             multiple
             className="hidden"
             onChange={handleAddPhotos}
@@ -349,9 +382,18 @@ export default function PostWizard({ initialPost }: PostWizardProps) {
             <>
               <div className="grid grid-cols-3 md:grid-cols-5 gap-3 mb-4">
                 {photos.map((p, i) => (
-                  <div key={i} className="relative aspect-square rounded-lg overflow-hidden group">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={p.previewUrl} alt="" className="w-full h-full object-cover" />
+                  <div key={i} className="relative aspect-square rounded-lg overflow-hidden group bg-black">
+                    {p.isVideo ? (
+                      <video src={p.previewUrl} className="w-full h-full object-cover" muted playsInline />
+                    ) : (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={p.previewUrl} alt="" className="w-full h-full object-cover" />
+                    )}
+                    {p.isVideo && (
+                      <span className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-black/70 text-white text-[10px] font-medium">
+                        VIDEO
+                      </span>
+                    )}
                     <button
                       onClick={() => removePhoto(i)}
                       className="absolute top-1 right-1 h-6 w-6 rounded-full bg-black/70 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
@@ -556,10 +598,24 @@ export default function PostWizard({ initialPost }: PostWizardProps) {
                 <Save className="h-4 w-4 mr-2" />
                 {saving ? "Saving..." : postId ? "Save Changes" : "Save Post"}
               </Button>
-              <Button onClick={handleExport} variant="outline" className="w-full">
-                <Download className="h-4 w-4 mr-2" />
-                Download PNG
-              </Button>
+              {videoPhoto ? (
+                <Button
+                  onClick={handleExportVideo}
+                  variant="outline"
+                  className="w-full"
+                  disabled={videoExportProgress !== null}
+                >
+                  <Download className="h-4 w-4 mr-2" />
+                  {videoExportProgress !== null
+                    ? `Rendering ${Math.round(videoExportProgress * 100)}%`
+                    : "Download Video (WebM)"}
+                </Button>
+              ) : (
+                <Button onClick={handleExport} variant="outline" className="w-full">
+                  <Download className="h-4 w-4 mr-2" />
+                  Download PNG
+                </Button>
+              )}
               <Button onClick={() => setStep("frame")} variant="ghost" className="w-full">
                 Change Frame
               </Button>
