@@ -79,12 +79,10 @@ export default function Header() {
       {/* Org switcher */}
       {orgs.length > 0 && (
         <DropdownMenu>
-          <DropdownMenuTrigger render={
-            <button className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors mr-4">
-              {activeOrg?.name || "Select org"}
-              <ChevronDown className="h-3 w-3" />
-            </button>
-          } />
+          <DropdownMenuTrigger className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors mr-4 outline-none">
+            {activeOrg?.name || "Select org"}
+            <ChevronDown className="h-3 w-3" />
+          </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
             <DropdownMenuLabel>Switch Organization</DropdownMenuLabel>
             <DropdownMenuSeparator />
