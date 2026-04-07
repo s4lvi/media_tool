@@ -223,8 +223,53 @@ async function encodeMp4(
   }
 
   const fps = 30;
-  const width = exportCanvas.width;
-  const height = exportCanvas.height;
+  // H.264 encoders require even width/height — round down to nearest even
+  const width = Math.floor(exportCanvas.width / 2) * 2;
+  const height = Math.floor(exportCanvas.height / 2) * 2;
+
+  // If we had to round, resize the canvas to match
+  if (width !== exportCanvas.width || height !== exportCanvas.height) {
+    exportCanvas.width = width;
+    exportCanvas.height = height;
+  }
+
+  // Probe codec support — try multiple H.264 profiles and pick the first
+  // supported one. Different browsers/hardware support different profiles.
+  const codecCandidates = [
+    "avc1.42001f", // Baseline 3.1
+    "avc1.42E01F", // Constrained Baseline 3.1
+    "avc1.42001E", // Baseline 3.0
+    "avc1.4D001F", // Main 3.1
+    "avc1.640028", // High 4.0
+    "avc1.640033", // High 5.1
+  ];
+
+  let workingCodec: string | null = null;
+  let lastError: string | null = null;
+  for (const codec of codecCandidates) {
+    try {
+      const result = await VideoEncoder.isConfigSupported({
+        codec,
+        width,
+        height,
+        bitrate: 8_000_000,
+        framerate: fps,
+      });
+      if (result.supported) {
+        workingCodec = result.config?.codec || codec;
+        break;
+      }
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  if (!workingCodec) {
+    throw new Error(
+      `No supported H.264 codec found at ${width}x${height}. ` +
+      `Try a different aspect ratio. ${lastError ? "Last error: " + lastError : ""}`
+    );
+  }
 
   // mp4-muxer setup
   const muxer = new Muxer({
@@ -238,23 +283,32 @@ async function encodeMp4(
     fastStart: "in-memory",
   });
 
-  // VideoEncoder setup — H.264 baseline so it plays everywhere
+  // VideoEncoder setup
+  let encoderError: unknown = null;
   const encoder = new VideoEncoder({
     output: (chunk, meta) => {
       muxer.addVideoChunk(chunk, meta);
     },
     error: (e) => {
       console.error("VideoEncoder error:", e);
+      encoderError = e;
     },
   });
 
   encoder.configure({
-    codec: "avc1.42001f", // H.264 Baseline 3.1
+    codec: workingCodec,
     width,
     height,
     bitrate: 8_000_000,
     framerate: fps,
   });
+
+  // Verify encoder reached configured state
+  if (encoder.state !== "configured") {
+    throw new Error(
+      `VideoEncoder failed to configure (state: ${encoder.state}). Codec: ${workingCodec}, ${width}x${height}`
+    );
+  }
 
   // Play the video and encode frames
   return new Promise<Blob>((resolve, reject) => {
@@ -264,10 +318,19 @@ async function encodeMp4(
 
     async function loop() {
       if (stopped) return;
+      if (encoderError) {
+        stopped = true;
+        reject(encoderError instanceof Error ? encoderError : new Error(String(encoderError)));
+        return;
+      }
+      if (encoder.state !== "configured") {
+        stopped = true;
+        reject(new Error(`VideoEncoder state is ${encoder.state}, not configured`));
+        return;
+      }
       try {
         drawFrame();
         const timestamp = frameIndex * frameDurationUs;
-        // Create a VideoFrame from the canvas
         const vf = new VideoFrame(exportCanvas, {
           timestamp,
           duration: frameDurationUs,
