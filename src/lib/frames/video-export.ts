@@ -68,6 +68,9 @@ export async function exportVideoWithFrame(
   const ffmpeg = await getFFmpeg();
   onProgress?.(0.4);
 
+  ffmpeg.on("log", ({ message }) => {
+    console.log("[ffmpeg]", message);
+  });
   ffmpeg.on("progress", ({ progress }) => {
     if (progress > 0 && progress <= 1) {
       onProgress?.(0.4 + progress * 0.55);
