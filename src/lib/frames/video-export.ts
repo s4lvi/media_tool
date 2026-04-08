@@ -90,37 +90,31 @@ async function renderOverlayBlob(
     return renderOverlayPass(template, texts, width, height);
   }
 
-  // Diff approach: render twice with different solid-color photos and treat
-  // pixels that differ as the visible photo-zone area (transparent in output).
+  // Chroma-key approach: render the template with bright magenta photos
+  // filling every photo zone, then make magenta pixels transparent. The
+  // remaining pixels are the actual overlay (anything visible above the
+  // photo zone, plus the surrounding template content).
   const numZones = Math.max(...photoZones.map((p) => (p as { photoIndex?: number }).photoIndex ?? 0)) + 1;
   const magenta = makeSolidDataUrl(255, 0, 255);
-  const green = makeSolidDataUrl(0, 255, 0);
-  const magentaPhotos = Array(numZones).fill(magenta);
-  const greenPhotos = Array(numZones).fill(green);
+  const photos = Array(numZones).fill(magenta);
 
-  const [canvasA, canvasB] = await Promise.all([
-    renderToOffscreen(template, texts, width, height, magentaPhotos),
-    renderToOffscreen(template, texts, width, height, greenPhotos),
-  ]);
-
-  const ctxA = canvasA.getContext("2d")!;
-  const ctxB = canvasB.getContext("2d")!;
-  const dataA = ctxA.getImageData(0, 0, width, height);
-  const dataB = ctxB.getImageData(0, 0, width, height);
-  const a = dataA.data;
-  const b = dataB.data;
-  for (let i = 0; i < a.length; i += 4) {
-    if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2]) {
-      a[i + 3] = 0;
+  const canvas = await renderToOffscreen(template, texts, width, height, photos);
+  const ctx = canvas.getContext("2d")!;
+  const imgData = ctx.getImageData(0, 0, width, height);
+  const d = imgData.data;
+  // Match magenta with tolerance to catch anti-aliased edges
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i], g = d[i + 1], b = d[i + 2];
+    if (r > 200 && g < 80 && b > 200) {
+      d[i + 3] = 0;
     }
   }
-  ctxA.putImageData(dataA, 0, 0);
+  ctx.putImageData(imgData, 0, 0);
 
   const blob = await new Promise<Blob>((resolve, reject) => {
-    canvasA.toBlob((bl) => (bl ? resolve(bl) : reject(new Error("overlay encode failed"))), "image/png");
+    canvas.toBlob((bl) => (bl ? resolve(bl) : reject(new Error("overlay encode failed"))), "image/png");
   });
-  if (canvasA.parentNode) canvasA.parentNode.removeChild(canvasA);
-  if (canvasB.parentNode) canvasB.parentNode.removeChild(canvasB);
+  if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
   return blob;
 }
 
