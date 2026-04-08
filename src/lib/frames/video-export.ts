@@ -32,6 +32,10 @@ export async function exportVideoWithFrame(
 
   onProgress?.(0.05);
   const overlayBlob = await renderOverlayBlob(template, texts, tw, th);
+  // DEBUG: stash the overlay so it can be inspected from devtools
+  (window as unknown as { __lastOverlay?: Blob }).__lastOverlay = overlayBlob;
+  console.log("[video-export] overlay PNG generated", overlayBlob.size, "bytes",
+    "— inspect via window.__lastOverlay (URL.createObjectURL(window.__lastOverlay))");
   onProgress?.(0.2);
 
   const videoRes = await fetch(videoUrl);
