@@ -6,7 +6,7 @@ import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { renderFrameTemplate, frameToDataUrl } from "@/lib/frames/renderer";
 import { resolveAssetPath, makeAssetRef, isAssetRef } from "@/lib/frames/asset-resolver";
-import { exportVideoWithFrame, downloadBlob, isVideoFile, isVideoUrl } from "@/lib/frames/video-export";
+import { exportVideoWithFrame, downloadBlob, isVideoFile, isVideoUrl, extractVideoPoster } from "@/lib/frames/video-export";
 import { ASPECT_RATIO_PRESETS } from "@/types/editor";
 import { uploadFile, getStoragePath } from "@/lib/supabase/storage";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -158,7 +158,15 @@ export default function PostWizard({ initialPost }: PostWizardProps) {
     let offscreen: HTMLCanvasElement | null = null;
     let fc: Awaited<ReturnType<typeof renderFrameTemplate>> | null = null;
     try {
-      const photoUrls = await getRenderPhotoUrls();
+      const rawPhotoUrls = await getRenderPhotoUrls();
+      const photoUrls = await Promise.all(
+        rawPhotoUrls.map(async (url, i) => {
+          if (photos[i]?.isVideo) {
+            try { return await extractVideoPoster(url); } catch { return url; }
+          }
+          return url;
+        })
+      );
       offscreen = document.createElement("canvas");
       offscreen.style.position = "fixed";
       offscreen.style.left = "-99999px";

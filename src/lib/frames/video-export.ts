@@ -22,10 +22,24 @@ async function getFFmpeg(): Promise<FFmpeg> {
 
   ffmpegLoading = (async () => {
     const ffmpeg = new FFmpeg();
-    const baseURL = "https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd";
+    // Multi-threaded core (~3-4x faster than single-threaded). Requires
+    // COOP/COEP headers (set in next.config.ts) so SharedArrayBuffer is
+    // available.
+    const mt = typeof SharedArrayBuffer !== "undefined";
+    const baseURL = mt
+      ? "https://unpkg.com/@ffmpeg/core-mt@0.12.10/dist/umd"
+      : "https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd";
     await ffmpeg.load({
       coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
       wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
+      ...(mt
+        ? {
+            workerURL: await toBlobURL(
+              `${baseURL}/ffmpeg-core.worker.js`,
+              "text/javascript"
+            ),
+          }
+        : {}),
     });
     ffmpegInstance = ffmpeg;
     return ffmpeg;
@@ -129,44 +143,74 @@ async function renderOverlayBlob(
   if (photoZones.length === 0) {
     return renderOverlayPass(template, texts, width, height, () => true);
   }
-  // Use the lowest photo zone zIndex as the split point
-  const splitZ = Math.min(...photoZones.map((o) => o.zIndex ?? 0));
-  const holes = photoZones.map((o) => ({
-    x: o.x, y: o.y, width: o.width, height: o.height,
-  }));
 
-  // Background: objects below the split point, with holes punched at photo zones
-  const bgBlob = await renderOverlayPass(
-    template,
-    texts,
-    width,
-    height,
-    (obj) => obj.type !== "photo-zone" && (obj.zIndex ?? 0) < splitZ,
-    holes
-  );
-  // Foreground: objects at or above the split point (but not the photo zones)
-  const fgBlob = await renderOverlayPass(
-    template,
-    texts,
-    width,
-    height,
-    (obj) => obj.type !== "photo-zone" && (obj.zIndex ?? 0) >= splitZ
-  );
-  // Composite fg over bg
-  return composeBlobs(bgBlob, fgBlob, width, height);
+  // Render the template twice with two different solid-color "photos" filling
+  // every photo zone. Pixels that differ between the two renders are the
+  // visible photo-zone pixels (i.e., not occluded by anything on top).
+  // We make those pixels transparent in the final overlay.
+  const numZones = Math.max(...photoZones.map((p) => p.photoIndex ?? 0)) + 1;
+  const magenta = makeSolidDataUrl(255, 0, 255);
+  const green = makeSolidDataUrl(0, 255, 0);
+  const magentaPhotos = Array(numZones).fill(magenta);
+  const greenPhotos = Array(numZones).fill(green);
+
+  const [canvasA, canvasB] = await Promise.all([
+    renderToOffscreen(template, texts, width, height, magentaPhotos),
+    renderToOffscreen(template, texts, width, height, greenPhotos),
+  ]);
+
+  const ctxA = canvasA.getContext("2d")!;
+  const ctxB = canvasB.getContext("2d")!;
+  const dataA = ctxA.getImageData(0, 0, width, height);
+  const dataB = ctxB.getImageData(0, 0, width, height);
+  const a = dataA.data;
+  const b = dataB.data;
+  for (let i = 0; i < a.length; i += 4) {
+    if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2]) {
+      a[i + 3] = 0;
+    }
+  }
+  ctxA.putImageData(dataA, 0, 0);
+
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvasA.toBlob((bl) => (bl ? resolve(bl) : reject(new Error("overlay encode failed"))), "image/png");
+  });
+  if (canvasA.parentNode) canvasA.parentNode.removeChild(canvasA);
+  if (canvasB.parentNode) canvasB.parentNode.removeChild(canvasB);
+  return blob;
 }
 
-async function composeBlobs(bg: Blob, fg: Blob, w: number, h: number): Promise<Blob> {
-  const [bgBmp, fgBmp] = await Promise.all([createImageBitmap(bg), createImageBitmap(fg)]);
+function makeSolidDataUrl(r: number, g: number, b: number): string {
   const c = document.createElement("canvas");
-  c.width = w;
-  c.height = h;
+  c.width = 4;
+  c.height = 4;
   const ctx = c.getContext("2d")!;
-  ctx.drawImage(bgBmp, 0, 0, w, h);
-  ctx.drawImage(fgBmp, 0, 0, w, h);
-  return await new Promise<Blob>((resolve, reject) => {
-    c.toBlob((b) => (b ? resolve(b) : reject(new Error("compose failed"))), "image/png");
+  ctx.fillStyle = `rgb(${r},${g},${b})`;
+  ctx.fillRect(0, 0, 4, 4);
+  return c.toDataURL("image/png");
+}
+
+async function renderToOffscreen(
+  template: FrameTemplate,
+  texts: { heading?: string; subheading?: string },
+  width: number,
+  height: number,
+  photos: string[]
+): Promise<HTMLCanvasElement> {
+  const offscreen = document.createElement("canvas");
+  offscreen.width = width;
+  offscreen.height = height;
+  offscreen.style.position = "fixed";
+  offscreen.style.left = "-99999px";
+  document.body.appendChild(offscreen);
+  const fc = await renderFrameTemplate(offscreen, template, {
+    scale: 1,
+    photos,
+    texts,
+    editorMode: false,
   });
+  fc.dispose();
+  return offscreen;
 }
 
 async function renderOverlayPass(
@@ -224,6 +268,48 @@ export function downloadBlob(blob: Blob, filename: string) {
   a.download = filename;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/**
+ * Extract a still poster frame from a video URL as a PNG data URL.
+ * Used by the on-screen preview so the canvas renderer can display
+ * a frame from the video.
+ */
+export async function extractVideoPoster(videoUrl: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const v = document.createElement("video");
+    v.crossOrigin = "anonymous";
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = "auto";
+    v.src = videoUrl;
+    const cleanup = () => {
+      v.removeAttribute("src");
+      v.load();
+    };
+    v.onloadedmetadata = () => {
+      v.currentTime = Math.min(0.1, (v.duration || 1) / 2);
+    };
+    v.onseeked = () => {
+      try {
+        const c = document.createElement("canvas");
+        c.width = v.videoWidth;
+        c.height = v.videoHeight;
+        const ctx = c.getContext("2d")!;
+        ctx.drawImage(v, 0, 0);
+        const url = c.toDataURL("image/png");
+        cleanup();
+        resolve(url);
+      } catch (e) {
+        cleanup();
+        reject(e);
+      }
+    };
+    v.onerror = () => {
+      cleanup();
+      reject(new Error("Failed to load video for poster extraction"));
+    };
+  });
 }
 
 export function isVideoFile(file: File): boolean {
