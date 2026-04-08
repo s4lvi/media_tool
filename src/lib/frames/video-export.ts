@@ -98,7 +98,17 @@ async function renderOverlayBlob(
   const magenta = makeSolidDataUrl(255, 0, 255);
   const photos = Array(numZones).fill(magenta);
 
-  const canvas = await renderToOffscreen(template, texts, width, height, photos);
+  // Strip filters / blendModes / opacity from photo zones so the magenta
+  // marker color survives intact for the chroma-key step.
+  const strippedTemplate: FrameTemplate = {
+    ...template,
+    objects: template.objects.map((o) => {
+      if (o.type !== "photo-zone") return o;
+      return { ...o, filters: undefined, blendMode: undefined, opacity: 1 };
+    }),
+  };
+
+  const canvas = await renderToOffscreen(strippedTemplate, texts, width, height, photos);
   const ctx = canvas.getContext("2d")!;
   const imgData = ctx.getImageData(0, 0, width, height);
   const d = imgData.data;
