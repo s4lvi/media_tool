@@ -171,8 +171,19 @@ async function renderToOffscreen(
     texts,
     editorMode: false,
   });
+  // fabric wraps the canvas and renders to its internal lowerCanvasEl —
+  // copy that content to a fresh canvas before disposing fabric.
+  const result = document.createElement("canvas");
+  result.width = width;
+  result.height = height;
+  const rctx = result.getContext("2d")!;
+  const fabricCanvasEl = (fc as unknown as { lowerCanvasEl: HTMLCanvasElement }).lowerCanvasEl;
+  if (fabricCanvasEl) {
+    rctx.drawImage(fabricCanvasEl, 0, 0, width, height);
+  }
   fc.dispose();
-  return offscreen;
+  if (offscreen.parentNode) offscreen.parentNode.removeChild(offscreen);
+  return result;
 }
 
 /**
