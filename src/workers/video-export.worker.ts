@@ -270,12 +270,16 @@ async function demuxVideo(blob: Blob): Promise<{
       file.onSamples = (id: number, _user: unknown, samples: any[]) => {
         if (track && id === track.id) {
           collected.push(...samples);
-          if (collected.length >= (track.nb_samples ?? 0) && !extracted) {
+          const expected = track.nb_samples ?? 0;
+          if (
+            expected > 0 &&
+            collected.length >= expected &&
+            !extracted &&
+            description
+          ) {
             extracted = true;
             file.flush();
-            if (track && description) {
-              resolve({ videoTrack: track, samples: collected, description });
-            }
+            resolve({ videoTrack: track, samples: collected, description });
           }
         }
       };
@@ -292,12 +296,37 @@ async function demuxVideo(blob: Blob): Promise<{
       }
       file.flush();
 
-      setTimeout(() => {
-        if (!extracted && track && description) {
+      // Give mp4box time to process any remaining samples, then resolve with
+      // whatever was collected. Poll every 100ms for up to 5s so we don't
+      // miss samples on slow/large files, but resolve as soon as we have
+      // enough to proceed.
+      let lastCount = -1;
+      let stableCycles = 0;
+      const poll = () => {
+        if (extracted) return;
+        if (collected.length === lastCount) {
+          stableCycles++;
+        } else {
+          stableCycles = 0;
+          lastCount = collected.length;
+        }
+        if (stableCycles >= 3 && collected.length > 0 && description) {
           extracted = true;
           resolve({ videoTrack: track, samples: collected, description });
+          return;
         }
-      }, 200);
+        if (stableCycles >= 20) {
+          if (collected.length > 0 && description) {
+            extracted = true;
+            resolve({ videoTrack: track, samples: collected, description });
+          } else {
+            reject(new Error("Video has no samples (mp4box could not decode)"));
+          }
+          return;
+        }
+        setTimeout(poll, 100);
+      };
+      setTimeout(poll, 100);
     } catch (e) {
       reject(e);
     }
