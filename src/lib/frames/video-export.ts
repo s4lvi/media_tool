@@ -90,16 +90,21 @@ async function renderOverlayBlob(
     return renderOverlayPass(template, texts, width, height);
   }
 
-  // Chroma-key approach: render the template with bright magenta photos
-  // filling every photo zone, then make magenta pixels transparent. The
-  // remaining pixels are the actual overlay (anything visible above the
-  // photo zone, plus the surrounding template content).
+  // Two-pass alpha extraction (a.k.a. blue-screen / difference matte).
+  // Render the template twice with different solid-color photos filling
+  // each photo zone, then per-pixel:
+  //   alpha = 1 - (R_magenta - R_green) / 255
+  //   fg.R = R_green / alpha
+  //   fg.G = G_magenta / alpha
+  //   fg.B = B_green / alpha
+  // This recovers the true alpha and unpremultiplied color of any element
+  // sitting on top of the photo zone, including semi-transparent logos.
   const numZones = Math.max(...photoZones.map((p) => (p as { photoIndex?: number }).photoIndex ?? 0)) + 1;
-  const magenta = makeSolidDataUrl(255, 0, 255);
-  const photos = Array(numZones).fill(magenta);
+  const magentaUrl = makeSolidDataUrl(255, 0, 255);
+  const greenUrl = makeSolidDataUrl(0, 255, 0);
 
-  // Strip filters / blendModes / opacity from photo zones so the magenta
-  // marker color survives intact for the chroma-key step.
+  // Strip filters / blendModes / opacity from photo zones so the marker
+  // colors come through unmodified.
   const strippedTemplate: FrameTemplate = {
     ...template,
     objects: template.objects.map((o) => {
@@ -108,23 +113,40 @@ async function renderOverlayBlob(
     }),
   };
 
-  const canvas = await renderToOffscreen(strippedTemplate, texts, width, height, photos);
-  const ctx = canvas.getContext("2d")!;
-  const imgData = ctx.getImageData(0, 0, width, height);
-  const d = imgData.data;
-  // Match magenta with tolerance to catch anti-aliased edges
-  for (let i = 0; i < d.length; i += 4) {
-    const r = d[i], g = d[i + 1], b = d[i + 2];
-    if (r > 200 && g < 80 && b > 200) {
-      d[i + 3] = 0;
+  const [canvasM, canvasG] = await Promise.all([
+    renderToOffscreen(strippedTemplate, texts, width, height, Array(numZones).fill(magentaUrl)),
+    renderToOffscreen(strippedTemplate, texts, width, height, Array(numZones).fill(greenUrl)),
+  ]);
+  const ctxM = canvasM.getContext("2d")!;
+  const ctxG = canvasG.getContext("2d")!;
+  const dM = ctxM.getImageData(0, 0, width, height).data;
+  const dG = ctxG.getImageData(0, 0, width, height).data;
+
+  const out = ctxM.createImageData(width, height);
+  const o = out.data;
+  for (let i = 0; i < o.length; i += 4) {
+    const dR = dM[i] - dG[i]; // 255*(1-α) ideally
+    // Clamp to [0, 255]
+    const oneMinusA = Math.max(0, Math.min(255, dR));
+    const alpha = 255 - oneMinusA;
+    if (alpha <= 0) {
+      o[i] = 0; o[i + 1] = 0; o[i + 2] = 0; o[i + 3] = 0;
+    } else {
+      // Unpremultiply
+      const af = alpha / 255;
+      o[i]     = Math.max(0, Math.min(255, dG[i] / af));
+      o[i + 1] = Math.max(0, Math.min(255, dM[i + 1] / af));
+      o[i + 2] = Math.max(0, Math.min(255, dG[i + 2] / af));
+      o[i + 3] = alpha;
     }
   }
-  ctx.putImageData(imgData, 0, 0);
+  ctxM.putImageData(out, 0, 0);
 
   const blob = await new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((bl) => (bl ? resolve(bl) : reject(new Error("overlay encode failed"))), "image/png");
+    canvasM.toBlob((bl) => (bl ? resolve(bl) : reject(new Error("overlay encode failed"))), "image/png");
   });
-  if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+  if (canvasM.parentNode) canvasM.parentNode.removeChild(canvasM);
+  if (canvasG.parentNode) canvasG.parentNode.removeChild(canvasG);
   return blob;
 }
 
