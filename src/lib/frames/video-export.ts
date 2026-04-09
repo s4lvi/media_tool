@@ -13,7 +13,7 @@ import { renderFrameTemplate } from "./renderer";
  */
 export async function exportVideoWithFrame(
   template: FrameTemplate,
-  videoUrl: string,
+  photos: Array<{ url: string; isVideo: boolean }>,
   texts: { heading?: string; subheading?: string },
   format: "webm" | "mp4" = "mp4",
   onProgress?: (pct: number) => void
@@ -21,8 +21,15 @@ export async function exportVideoWithFrame(
   const tw = Math.floor(template.width / 2) * 2;
   const th = Math.floor(template.height / 2) * 2;
 
-  const photoZone = template.objects.find((o) => o.type === "photo-zone");
-  if (!photoZone) throw new Error("Template has no photo zone for the video");
+  // Find the first video photo and the photo zone it maps to.
+  const videoIdx = photos.findIndex((p) => p.isVideo);
+  if (videoIdx < 0) throw new Error("No video in photos");
+  const videoUrl = photos[videoIdx].url;
+
+  const photoZone = template.objects.find(
+    (o) => o.type === "photo-zone" && ((o as { photoIndex?: number }).photoIndex ?? 0) === videoIdx
+  );
+  if (!photoZone) throw new Error("No photo zone is bound to the video");
   const pz = {
     x: photoZone.x,
     y: photoZone.y,
@@ -31,7 +38,19 @@ export async function exportVideoWithFrame(
   };
 
   onProgress?.(0.05);
-  const overlayBlob = await renderOverlayBlob(template, texts, tw, th);
+  // Resolve still-image URLs for non-video photos so the overlay renderer
+  // can bake them into their photo zones. For any additional videos beyond
+  // the first, extract a poster frame (rendered as a static image).
+  const stillUrls = await Promise.all(
+    photos.map(async (p, i) => {
+      if (i === videoIdx) return null; // marker, handled by alpha extraction
+      if (p.isVideo) {
+        try { return await extractVideoPoster(p.url); } catch { return null; }
+      }
+      return p.url;
+    })
+  );
+  const overlayBlob = await renderOverlayBlob(template, texts, tw, th, stillUrls, videoIdx);
   // DEBUG: stash the overlay so it can be inspected from devtools
   (window as unknown as { __lastOverlay?: Blob }).__lastOverlay = overlayBlob;
   console.log("[video-export] overlay PNG generated", overlayBlob.size, "bytes",
@@ -83,7 +102,9 @@ async function renderOverlayBlob(
   template: FrameTemplate,
   texts: { heading?: string; subheading?: string },
   width: number,
-  height: number
+  height: number,
+  stillUrls: Array<string | null> = [],
+  videoIdx: number = -1
 ): Promise<Blob> {
   const photoZones = template.objects.filter((o) => o.type === "photo-zone");
   if (photoZones.length === 0) {
@@ -99,23 +120,54 @@ async function renderOverlayBlob(
   //   fg.B = B_green / alpha
   // This recovers the true alpha and unpremultiplied color of any element
   // sitting on top of the photo zone, including semi-transparent logos.
-  const numZones = Math.max(...photoZones.map((p) => (p as { photoIndex?: number }).photoIndex ?? 0)) + 1;
+  const numZones = Math.max(
+    ...photoZones.map((p) => (p as { photoIndex?: number }).photoIndex ?? 0),
+    stillUrls.length - 1
+  ) + 1;
   const magentaUrl = makeSolidDataUrl(255, 0, 255);
   const greenUrl = makeSolidDataUrl(0, 255, 0);
 
-  // Strip filters / blendModes / opacity from photo zones so the marker
-  // colors come through unmodified.
+  // Build photo arrays: still images use their real URLs (so they're baked
+  // into the overlay identically in both passes), only the video photo
+  // zone(s) get the magenta/green markers for alpha extraction.
+  const photosM: string[] = [];
+  const photosG: string[] = [];
+  for (let i = 0; i < numZones; i++) {
+    if (i === videoIdx) {
+      photosM.push(magentaUrl);
+      photosG.push(greenUrl);
+    } else {
+      const url = stillUrls[i];
+      if (url) {
+        photosM.push(url);
+        photosG.push(url);
+      } else {
+        // No photo for this slot — fall back to markers so it becomes a
+        // transparent hole rather than an empty rectangle.
+        photosM.push(magentaUrl);
+        photosG.push(greenUrl);
+      }
+    }
+  }
+
+  // Strip filters / blendModes / opacity only from the VIDEO photo zone so
+  // the marker colors come through unmodified. Image photo zones keep their
+  // filters (grayscale, etc.) so the baked image matches the preview.
   const strippedTemplate: FrameTemplate = {
     ...template,
     objects: template.objects.map((o) => {
       if (o.type !== "photo-zone") return o;
-      return { ...o, filters: undefined, blendMode: undefined, opacity: 1 };
+      const pIdx = (o as { photoIndex?: number }).photoIndex ?? 0;
+      if (pIdx === videoIdx || !stillUrls[pIdx]) {
+        return { ...o, filters: undefined, blendMode: undefined, opacity: 1 };
+      }
+      return o;
     }),
   };
 
   const [canvasM, canvasG] = await Promise.all([
-    renderToOffscreen(strippedTemplate, texts, width, height, Array(numZones).fill(magentaUrl)),
-    renderToOffscreen(strippedTemplate, texts, width, height, Array(numZones).fill(greenUrl)),
+    renderToOffscreen(strippedTemplate, texts, width, height, photosM),
+    renderToOffscreen(strippedTemplate, texts, width, height, photosG),
   ]);
   const ctxM = canvasM.getContext("2d")!;
   const ctxG = canvasG.getContext("2d")!;

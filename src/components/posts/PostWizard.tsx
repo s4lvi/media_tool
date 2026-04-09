@@ -273,10 +273,15 @@ export default function PostWizard({ initialPost }: PostWizardProps) {
     if (!selectedTemplate || !videoPhoto) return;
     setVideoExportProgress(0);
     try {
-      const videoUrl = videoPhoto.ref ? await resolveAssetPath(videoPhoto.ref) : videoPhoto.previewUrl;
+      const resolved = await Promise.all(
+        photos.map(async (p) => ({
+          url: p.ref ? await resolveAssetPath(p.ref) : p.previewUrl,
+          isVideo: !!p.isVideo,
+        }))
+      );
       const blob = await exportVideoWithFrame(
         selectedTemplate,
-        videoUrl,
+        resolved,
         { heading, subheading },
         format,
         (pct) => setVideoExportProgress(pct)
@@ -288,7 +293,7 @@ export default function PostWizard({ initialPost }: PostWizardProps) {
     } finally {
       setVideoExportProgress(null);
     }
-  }, [selectedTemplate, videoPhoto, heading, subheading, postName]);
+  }, [selectedTemplate, videoPhoto, photos, heading, subheading, postName]);
 
   // Export PNG at full resolution
   const handleExport = useCallback(async () => {
